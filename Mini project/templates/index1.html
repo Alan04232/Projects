@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Disaster Monitoring Map</title>
+
+  <!-- Leaflet CSS -->
+  <link
+    rel="stylesheet"
+    href="https://unpkg.com/leaflet/dist/leaflet.css"
+  />
+
+  <style>
+    body { margin: 0; font-family: Arial; }
+    #map { height: 100vh; width: 100vw; }
+
+    .legend {
+      position: absolute;
+      bottom: 20px;
+      left: 20px;
+      background: white;
+      padding: 10px;
+      border-radius: 6px;
+      font-size: 14px;
+    }
+  </style>
+</head>
+
+<body>
+
+<div id="map"></div>
+
+<div class="legend">
+  <b>Risk Levels</b><br>
+  🟢 Normal<br>
+  🟡 Warning<br>
+  🔴 Danger
+</div>
+
+<!-- Leaflet JS -->
+<script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+
+<script>
+  // Initialize map
+  const map = L.map('map').setView([10.0, 76.5], 8);
+
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    attribution: '© OpenStreetMap'
+  }).addTo(map);
+
+  let markers = {};
+
+  function getColor(risk) {
+    if (risk === "HIGH") return "red";
+    if (risk === "MEDIUM") return "orange";
+    return "green";
+  }
+
+  function updateMap() {
+    fetch("/api/data")
+      .then(res => res.json())
+      .then(data => {
+        for (let id in data) {
+          const node = data[id];
+          const color = getColor(node.risk);
+
+          const popupText = `
+            <b>Node ${id}</b><br>
+            Risk: ${node.risk}<br>
+            Probability: ${node.probability}%<br>
+            Last Update: ${node.time}
+          `;
+
+          if (markers[id]) {
+            markers[id].setStyle({ color });
+            markers[id].setPopupContent(popupText);
+          } else {
+            markers[id] = L.circleMarker(
+              [node.lat, node.lon],
+              {
+                radius: 10,
+                color: color,
+                fillColor: color,
+                fillOpacity: 0.8
+              }
+            )
+            .addTo(map)
+            .bindPopup(popupText);
+          }
+        }
+      });
+  }
+
+  setInterval(updateMap, 2000);
+  updateMap();
+</script>
+
+</body>
+</html>

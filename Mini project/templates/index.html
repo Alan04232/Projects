@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Disaster Probability Prediction Map</title>
+
+  <!-- Leaflet -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css">
+  <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+
+  <!-- Heatmap Plugin -->
+  <script src="https://unpkg.com/leaflet.heat/dist/leaflet-heat.js"></script>
+
+  <style>
+    body {
+      margin: 0;
+      font-family: Arial, sans-serif;
+    }
+
+    #map {
+      height: 100vh;
+      width: 100vw;
+    }
+
+    .legend {
+      position: absolute;
+      bottom: 20px;
+      left: 20px;
+      background: white;
+      padding: 12px;
+      border-radius: 6px;
+      font-size: 14px;
+      box-shadow: 0 0 10px rgba(0,0,0,0.3);
+    }
+  </style>
+</head>
+
+<body>
+
+<div id="map"></div>
+
+<div class="legend">
+  <b>Disaster Probability</b><br>
+  🟢 Low<br>
+  🟡 Medium<br>
+  🔴 High
+</div>
+
+<script>
+  // ----------------------------
+  // MAP INITIALIZATION
+  // ----------------------------
+  const map = L.map("map").setView([10.04, 76.35], 10);
+
+  L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+    attribution: "© OpenStreetMap contributors"
+  }).addTo(map);
+
+  let heatLayer;
+
+  // ----------------------------
+  // LOAD ML PREDICTION DATA
+  // ----------------------------
+  function loadPredictionMap() {
+    fetch("/api/risk-map")
+      .then(res => res.json())
+      .then(data => {
+
+        let heatData = [];
+
+        data.forEach(cell => {
+          heatData.push([
+            cell.lat,
+            cell.lon,
+            cell.probability   // intensity (0–1)
+          ]);
+        });
+
+        if (heatLayer) {
+          map.removeLayer(heatLayer);
+        }
+
+        heatLayer = L.heatLayer(heatData, {
+          radius: 30,
+          blur: 20,
+          maxZoom: 13,
+          gradient: {
+            0.0: "#00ff00",   // green
+            0.4: "#ffff00",   // yellow
+            0.6: "#ff9900",   // orange
+            0.8: "#ff0000"    // red
+          }
+        }).addTo(map);
+      });
+  }
+
+  loadPredictionMap();
+  setInterval(loadPredictionMap, 5000);
+</script>
+
+</body>
+</html>
