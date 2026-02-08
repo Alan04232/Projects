@@ -2,125 +2,117 @@ from flask import Flask, jsonify, request, render_template
 from datetime import datetime
 import numpy as np
 import joblib
+import threading
+import time
 
-# -------------------------------
-# FLASK APP
-# -------------------------------
 app = Flask(__name__)
 
-# -------------------------------
-# LOAD TRAINED ML MODEL
-# -------------------------------
-model = joblib.load("model.pkl")   # RandomForest / LogisticRegression
+# ---------------- LOAD ML MODEL ----------------
+model = joblib.load("D:\workspace\Projects\Mini project\model.pkl")
 
-# -------------------------------
-# DATA STORE
-# -------------------------------
-node_data = {}
+# ---------------- DATA STORAGE ----------------
+raw_buffer = {}        # temporary 5-min data
+hourly_db = {}         # final hourly database
 
-# -------------------------------
-# STATIC GEO + SOIL DATA (PROTOTYPE)
-# -------------------------------
-node_properties = {
-    1: {
-        "soil_type": 2,        # Laterite
-        "soil_capacity": 140,  # mm
-        "slope": 25            # degrees
-    }
+# ---------------- STATIC NODE INFO ----------------
+node_props = {
+    1: {"soil_type": 2, "soil_capacity": 140, "slope": 25}
 }
 
-# -------------------------------
-# WEATHER DATA (SIMULATED)
-# -------------------------------
+# ---------------- SIMULATED WEATHER ----------------
 def get_rainfall(lat, lon):
-    # Replace with real API later
-    return np.random.randint(20, 200)  # mm (3-day cumulative)
+    return np.random.randint(40, 200)
 
-# -------------------------------
-# ML PREDICTION
-# -------------------------------
+# ---------------- ML ----------------
 def ml_predict(features):
-    """
-    features order:
-    [soil_moisture, vibration, humidity, rain_3day,
-     soil_type, soil_capacity, slope]
-    """
-    X = np.array([features])
-    probability = model.predict_proba(X)[0][1]
-    return probability
+    return model.predict_proba([features])[0][1]
 
-def risk_level(prob):
-    if prob > 0.75:
+def risk_level(p):
+    if p > 0.75:
         return "HIGH"
-    elif prob > 0.4:
+    elif p > 0.4:
         return "MEDIUM"
     else:
         return "LOW"
 
-# -------------------------------
-# RECEIVE DATA FROM INTERMEDIATE NODE
-# -------------------------------
+# ---------------- RECEIVE 5-MIN DATA ----------------
 @app.route("/node-data", methods=["POST"])
 def receive_node_data():
     data = request.json
     node_id = data["node_id"]
 
-    lat = data["lat"]
-    lon = data["lon"]
-    soil = data["soil_moisture"]
-    vibration = data["vibration"]
-    humidity = data.get("humidity", 70)
+    if node_id not in raw_buffer:
+        raw_buffer[node_id] = []
 
-    # Static + contextual data
-    soil_type = node_properties[node_id]["soil_type"]
-    soil_capacity = node_properties[node_id]["soil_capacity"]
-    slope = node_properties[node_id]["slope"]
-    rain_3day = get_rainfall(lat, lon)
+    raw_buffer[node_id].append({
+        "soil": data["soil_moisture"],
+        "vibration": data["vibration"],
+        "lat": data["lat"],
+        "lon": data["lon"],
+        "time": datetime.now()
+    })
 
-    # ---- ML FEATURE VECTOR ----
-    features = [
-        soil,
-        vibration,
-        humidity,
-        rain_3day,
-        soil_type,
-        soil_capacity,
-        slope
-    ]
+    return jsonify({"status": "received"})
 
-    # ---- ML PREDICTION ----
-    prob = ml_predict(features)
-    risk = risk_level(prob)
+# ---------------- HOURLY AGGREGATION THREAD ----------------
+def hourly_processor():
+    while True:
+        time.sleep(3600)  # 1 hour
 
-    # ---- STORE RESULT ----
-    node_data[node_id] = {
-        "lat": lat,
-        "lon": lon,
-        "risk": risk,
-        "probability": round(prob * 100, 2),
-        "time": datetime.now().strftime("%H:%M:%S")
-    }
+        for node_id, records in raw_buffer.items():
+            if len(records) == 0:
+                continue
 
-    print(f"Node {node_id} | Risk: {risk} | Prob: {prob:.2f}")
+            soils = [r["soil"] for r in records]
+            vibs = [r["vibration"] for r in records]
 
-    return jsonify({"status": "ok"})
+            soil_avg = np.mean(soils)
+            vib_max = np.max(vibs)
+            vib_std = np.std(vibs)
 
-# -------------------------------
-# API FOR WEB DASHBOARD
-# -------------------------------
+            lat = records[-1]["lat"]
+            lon = records[-1]["lon"]
+
+            rain = get_rainfall(lat, lon)
+            props = node_props[node_id]
+
+            features = [
+                soil_avg,
+                vib_max,
+                70,              # humidity
+                rain,
+                props["soil_type"],
+                props["soil_capacity"],
+                props["slope"]
+            ]
+
+            prob = ml_predict(features)
+            risk = risk_level(prob)
+
+            hourly_db[node_id] = {
+                "lat": lat,
+                "lon": lon,
+                "risk": risk,
+                "probability": round(prob * 100, 2),
+                "soil_avg": round(soil_avg, 2),
+                "vib_max": round(vib_max, 3),
+                "vib_std": round(vib_std, 4),
+                "time": datetime.now().strftime("%Y-%m-%d %H:00")
+            }
+
+        # Clear raw buffer after processing
+        raw_buffer.clear()
+
+# ---------------- API FOR WEB ----------------
 @app.route("/api/data")
 def api_data():
-    return jsonify(node_data)
+    return jsonify(hourly_db)
 
-# -------------------------------
-# WEB PAGE
-# -------------------------------
 @app.route("/")
 def index():
     return render_template("index.html")
 
-# -------------------------------
-# START SERVER
-# -------------------------------
+# ---------------- START SERVER ----------------
 if __name__ == "__main__":
+    threading.Thread(target=hourly_processor, daemon=True).start()
     app.run(debug=True)
