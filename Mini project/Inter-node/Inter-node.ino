@@ -2,8 +2,8 @@
 #include <WebServer.h>
 #include <HTTPClient.h>
 
-const char* ssid = "YOUR_WIFI";
-const char* password = "YOUR_PASSWORD";
+const char* ssid = "realme8";
+const char* password = "1234567890";
 
 // Server (PC) IP
 const char* serverURL = "http://192.168.1.100/node-data";
@@ -23,7 +23,7 @@ void handleNodeData() {
 }
 
 void setup() {
-  Serial.begin(115200);
+  Serial.begin(9600);
 
   WiFi.begin(ssid, password);
   while (WiFi.status() != WL_CONNECTED) {

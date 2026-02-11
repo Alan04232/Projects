@@ -8,11 +8,11 @@ import time
 app = Flask(__name__)
 
 # ---------------- LOAD ML MODEL ----------------
-model = joblib.load("D:\workspace\Projects\Mini project\model.pkl")
+model = joblib.load(r"D:\workspace\Projects\Mini project\model.pkl")
 
 # ---------------- DATA STORAGE ----------------
-raw_buffer = {}        # temporary 5-min data
-hourly_db = {}         # final hourly database
+raw_buffer = {}
+hourly_db = {}
 
 # ---------------- STATIC NODE INFO ----------------
 node_props = {
@@ -35,18 +35,18 @@ def risk_level(p):
     else:
         return "LOW"
 
-# ---------------- RECEIVE 5-MIN DATA ----------------
+# ---------------- RECEIVE DATA ----------------
 @app.route("/node-data", methods=["POST"])
 def receive_node_data():
     data = request.json
     node_id = data["node_id"]
 
-    if node_id not in raw_buffer:
-        raw_buffer[node_id] = []
-
-    raw_buffer[node_id].append({
+    raw_buffer.setdefault(node_id, []).append({
         "soil": data["soil_moisture"],
-        "vibration": data["vibration"],
+        "vib_x": data["vib_x"],
+        "vib_y": data["vib_y"],
+        "vib_z": data["vib_z"],
+        "humidity": data.get("humidity", 70),
         "lat": data["lat"],
         "lon": data["lon"],
         "time": datetime.now()
@@ -54,32 +54,36 @@ def receive_node_data():
 
     return jsonify({"status": "received"})
 
-# ---------------- HOURLY AGGREGATION THREAD ----------------
+# ---------------- HOURLY AGGREGATION ----------------
 def hourly_processor():
     while True:
-        time.sleep(3600)  # 1 hour
+        time.sleep(3600)
 
-        for node_id, records in raw_buffer.items():
-            if len(records) == 0:
+        local_copy = raw_buffer.copy()
+        raw_buffer.clear()
+
+        for node_id, records in local_copy.items():
+            if not records:
                 continue
 
             soils = [r["soil"] for r in records]
-            vibs = [r["vibration"] for r in records]
+            vx = [r["vib_x"] for r in records]
+            vy = [r["vib_y"] for r in records]
+            vz = [r["vib_z"] for r in records]
+            hums = [r["humidity"] for r in records]
 
             soil_avg = np.mean(soils)
-            vib_max = np.max(vibs)
-            vib_std = np.std(vibs)
+            vib_max = max(max(vx), max(vy), max(vz))
+            hum_avg = np.mean(hums)
 
-            lat = records[-1]["lat"]
-            lon = records[-1]["lon"]
-
+            lat, lon = records[-1]["lat"], records[-1]["lon"]
             rain = get_rainfall(lat, lon)
-            props = node_props[node_id]
+            props = node_props.get(node_id, node_props[1])
 
             features = [
                 soil_avg,
                 vib_max,
-                70,              # humidity
+                hum_avg,
                 rain,
                 props["soil_type"],
                 props["soil_capacity"],
@@ -95,15 +99,13 @@ def hourly_processor():
                 "risk": risk,
                 "probability": round(prob * 100, 2),
                 "soil_avg": round(soil_avg, 2),
-                "vib_max": round(vib_max, 3),
-                "vib_std": round(vib_std, 4),
+                "vib_x_max": round(max(vx), 3),
+                "vib_y_max": round(max(vy), 3),
+                "vib_z_max": round(max(vz), 3),
                 "time": datetime.now().strftime("%Y-%m-%d %H:00")
             }
 
-        # Clear raw buffer after processing
-        raw_buffer.clear()
-
-# ---------------- API FOR WEB ----------------
+# ---------------- API ----------------
 @app.route("/api/data")
 def api_data():
     return jsonify(hourly_db)
