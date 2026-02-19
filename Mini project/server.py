@@ -35,23 +35,25 @@ def risk_level(p):
     else:
         return "LOW"
 
-# ---------------- RECEIVE DATA ----------------
+# ---------------- RECEIVE DATA FROM GATEWAY ----------------
 @app.route("/node-data", methods=["POST"])
 def receive_node_data():
     data = request.json
+
+    print("RECEIVED FROM GATEWAY:", data)   # 👈 debug print
+
     node_id = data["node_id"]
 
     raw_buffer.setdefault(node_id, []).append({
-    "soil": data["soil_moisture"],
-    "vib_x": data["vib_x"],
-    "vib_y": data["vib_y"],
-    "vib_z": data["vib_z"],
-    "humidity": data.get("humidity",70),
-    "lat": data["lat"],
-    "lon": data["lon"],
-    "time": datetime.now()
-})
-
+        "soil": data["soil_moisture"],
+        "vib_x": data["vib_x"],
+        "vib_y": data["vib_y"],
+        "vib_z": data["vib_z"],
+        "humidity": data.get("humidity", 70),
+        "lat": data["lat"],
+        "lon": data["lon"],
+        "time": datetime.now()
+    })
 
     return jsonify({"status": "received"})
 
@@ -106,11 +108,12 @@ def hourly_processor():
                 "time": datetime.now().strftime("%Y-%m-%d %H:00")
             }
 
-# ---------------- API ----------------
+# ---------------- API FOR DASHBOARD ----------------
 @app.route("/api/data")
 def api_data():
     return jsonify(hourly_db)
 
+# ---------------- HOME PAGE ----------------
 @app.route("/")
 def index():
     return render_template("index.html")
@@ -118,4 +121,6 @@ def index():
 # ---------------- START SERVER ----------------
 if __name__ == "__main__":
     threading.Thread(target=hourly_processor, daemon=True).start()
-    app.run(debug=True)
+
+    # IMPORTANT: expose to hotspot network
+    app.run(host="0.0.0.0", port=5000, debug=True)
