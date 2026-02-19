@@ -12,7 +12,7 @@
 #define LAT 10.020
 #define LON 76.300
 
-const char* ssid = "Realme";
+const char* ssid = "IQOO Z7 PRO";
 const char* password = "";
 
 // Laptop IP (server)

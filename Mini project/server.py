@@ -42,15 +42,16 @@ def receive_node_data():
     node_id = data["node_id"]
 
     raw_buffer.setdefault(node_id, []).append({
-        "soil": data["soil_moisture"],
-        "vib_x": data["vib_x"],
-        "vib_y": data["vib_y"],
-        "vib_z": data["vib_z"],
-        "humidity": data.get("humidity", 70),
-        "lat": data["lat"],
-        "lon": data["lon"],
-        "time": datetime.now()
-    })
+    "soil": data["soil_moisture"],
+    "vib_x": data["vib_x"],
+    "vib_y": data["vib_y"],
+    "vib_z": data["vib_z"],
+    "humidity": data.get("humidity",70),
+    "lat": data["lat"],
+    "lon": data["lon"],
+    "time": datetime.now()
+})
+
 
     return jsonify({"status": "received"})
 

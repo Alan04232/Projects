@@ -2,38 +2,62 @@
 #include <WebServer.h>
 #include <HTTPClient.h>
 
-const char* ssid = "realme8";
-const char* password = "1234567890";
+const char* ssid = "N00384";
+const char* password = "01010123";
 
-// Server (PC) IP
-const char* serverURL = "http://192.168.1.100/node-data";
+/* 👉 PUT FLASK SERVER PC IP */
+const char* serverURL = "http://192.168.1.100:5000/node-data";
 
 WebServer server(80);
 
 void handleNodeData() {
+
   String payload = server.arg("plain");
 
-  HTTPClient http;
-  http.begin(serverURL);
-  http.addHeader("Content-Type", "application/json");
-  http.POST(payload);
-  http.end();
+  Serial.println("From node: " + payload);
 
-  server.send(200, "text/plain", "OK");
+  if (WiFi.status() == WL_CONNECTED) {
+
+    HTTPClient http;
+    http.begin(serverURL);
+    http.addHeader("Content-Type","application/json");
+
+    int code = http.POST(payload);
+
+    Serial.println("To server: " + String(code));
+
+    http.end();
+    server.send(200,"text/plain","OK");
+  } 
+  else {
+    server.send(500,"text/plain","WiFi lost");
+  }
+}
+
+void connectWiFi() {
+  WiFi.begin(ssid,password);
+  Serial.print("WiFi");
+  while (WiFi.status()!=WL_CONNECTED){
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println(" connected");
 }
 
 void setup() {
-  Serial.begin(9600);
+  Serial.begin(115200);
+  connectWiFi();
 
-  WiFi.begin(ssid, password);
-  while (WiFi.status() != WL_CONNECTED) {
-    delay(500);
-  }
+  Serial.print("Gateway IP: ");
+  Serial.println(WiFi.localIP());
 
-  server.on("/node-data", HTTP_POST, handleNodeData);
+  server.on("/node-data",HTTP_POST,handleNodeData);
   server.begin();
 }
 
 void loop() {
   server.handleClient();
+
+  if (WiFi.status()!=WL_CONNECTED)
+    connectWiFi();
 }
