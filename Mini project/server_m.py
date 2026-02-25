@@ -1,35 +1,35 @@
 
-+from __future__ import annotations
-+
-+from datetime import datetime
-+import json
-+from typing import Any, Dict, Tuple
-+
- from flask import Flask, jsonify, render_template
- import paho.mqtt.client as mqtt
--import json
--from datetime import datetime
+from __future__ import annotations
+
+from datetime import datetime
+import json
+from typing import Any, Dict, Tuple
+
+from flask import Flask, jsonify, render_template
+import paho.mqtt.client as mqtt
+import json
+from datetime import datetime
  
- app = Flask(__name__)
+app = Flask(__name__)
  
--#test data
--test_data = {
--    "node_id": 99,
--    "lat": 10.2,
--    "lon": 76.5,
--    "soil": 90,
--    "vibration": 0.08,
--    "humidity": 88
--}
--risk, prob = predict_risk(test_data)
--node_data[99] = {
--    "lat": test_data["lat"],
--    "lon": test_data["lon"],
--    "risk": risk,
--    "probability": round(prob * 100, 1),
--    "data": test_data,
--    "time": datetime.now().strftime("%H:%M:%S")
--}
+#test data
+test_data = {
+    "node_id": 99,
+    "lat": 10.2,
+    "lon": 76.5,
+    "soil": 90,
+    "vibration": 0.08,
+    "humidity": 88
+}
+risk, prob = predict_risk(test_data)
+node_data[99] = {
+    "lat": test_data["lat"],
+    "lon": test_data["lon"],
+    "risk": risk,
+    "probability": round(prob * 100, 1),
+    "data": test_data,
+    "time": datetime.now().strftime("%H:%M:%S")
+}
  # -------------------------------
  # NODE DATA STORE
  # -------------------------------
