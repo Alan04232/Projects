@@ -112,7 +112,9 @@ def hourly_processor():
 @app.route("/api/data")
 def api_data():
     return jsonify(hourly_db)
-
+@app.route("/api/realtime")
+def api_realtime():
+    return jsonify(raw_buffer)
 # ---------------- HOME PAGE ----------------
 @app.route("/")
 def index():

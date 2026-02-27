@@ -17,7 +17,7 @@
 #define LAT 10.020
 #define LON 76.300
 
-// 👉 PUT YOUR GATEWAY MAC HERE
+// 👉 PUT YOUR GATEWAY MAC HERE  
 uint8_t GATEWAY_MAC[] = {0x00, 0x70, 0x07, 0x3A, 0x55, 0x58};
 
 Adafruit_MPU6050 mpu;

@@ -1,95 +1,172 @@
-from flask import Flask, jsonify, render_template
-import paho.mqtt.client as mqtt
-import json
+from flask import Flask, request, jsonify
 from datetime import datetime
+import numpy as np
+import threading
+import time
+import csv
+import os
+import pandas as pd
+from sklearn.ensemble import RandomForestClassifier
+import joblib
 
 app = Flask(__name__)
 
-#test data
-test_data = {
-    "node_id": 99,
-    "lat": 10.2,
-    "lon": 76.5,
-    "soil": 90,
-    "vibration": 0.08,
-    "humidity": 88
-}
-risk, prob = predict_risk(test_data)
-node_data[99] = {
-    "lat": test_data["lat"],
-    "lon": test_data["lon"],
-    "risk": risk,
-    "probability": round(prob * 100, 1),
-    "data": test_data,
-    "time": datetime.now().strftime("%H:%M:%S")
-}
-# -------------------------------
-# NODE DATA STORE
-# -------------------------------
-node_data = {}
+# ---------------- FILES ----------------
+CSV_FILE = "training_data_30min.csv"
+MODEL_FILE = "model.pkl"
 
-# -------------------------------
-# SIMPLE ML RISK PREDICTION
-# -------------------------------
-def predict_risk(data):
-    soil = data.get("soil", 0)
-    vibration = data.get("vibration", 0)
-    humidity = data.get("humidity", 0)
+# ---------------- DATA STORAGE ----------------
+minute_buffer = {}
+latest_data = {}
+model = None
 
-    score = 0
-    if soil > 70: score += 0.4
-    if vibration > 0.05: score += 0.4
-    if humidity > 80: score += 0.2
+# ---------------- INITIALIZE CSV ----------------
+if not os.path.exists(CSV_FILE):
+    with open(CSV_FILE, "w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow([
+            "timestamp",
+            "node_id",
+            "lat",
+            "lon",
+            "soil_avg",
+            "vib_avg",
+            "vib_max",
+            "flame_avg",
+            "flame_max",
+            "label"   # manual or auto hazard label
+        ])
 
-    if score >= 0.7:
-        return "HIGH", score
-    elif score >= 0.4:
-        return "MEDIUM", score
-    else:
-        return "LOW", score
+# ---------------- LOAD MODEL IF EXISTS ----------------
+if os.path.exists(MODEL_FILE):
+    model = joblib.load(MODEL_FILE)
 
-# -------------------------------
-# MQTT CALLBACK
-# -------------------------------
-def on_message(client, userdata, msg):
-    data = json.loads(msg.payload.decode())
+# ---------------- RECEIVE DATA (5 sec) ----------------
+@app.route("/node-data", methods=["POST"])
+def receive_data():
+    data = request.json
     node_id = data["node_id"]
 
-    risk, prob = predict_risk(data)
+    minute_buffer.setdefault(node_id, []).append({
+        "soil": data["soil_moisture"],
+        "vib": max(abs(data["vib_x"]),
+                   abs(data["vib_y"]),
+                   abs(data["vib_z"])),
+        "flame": data["flame_adc"],
+        "lat": data["lat"],
+        "lon": data["lon"]
+    })
 
-    node_data[node_id] = {
+    # Real-time prediction (if model exists)
+    if model:
+        features = [[
+            data["soil_moisture"],
+            max(abs(data["vib_x"]),
+                abs(data["vib_y"]),
+                abs(data["vib_z"])),
+            data["flame_adc"]
+        ]]
+        prob = model.predict_proba(features)[0][1]
+        risk = "HIGH" if prob > 0.7 else "MEDIUM" if prob > 0.4 else "LOW"
+    else:
+        risk = "UNKNOWN"
+        prob = 0
+
+    latest_data[node_id] = {
         "lat": data["lat"],
         "lon": data["lon"],
         "risk": risk,
-        "probability": round(prob * 100, 1),
-        "data": data,
+        "probability": round(prob * 100, 2),
         "time": datetime.now().strftime("%H:%M:%S")
     }
 
-    print(f"Node {node_id} | {risk} | {prob*100:.1f}%")
+    return jsonify({"status": "ok"})
 
-# -------------------------------
-# MQTT SETUP
-# -------------------------------
-mqtt_client = mqtt.Client()
-mqtt_client.on_message = on_message
-mqtt_client.connect("localhost", 1883)
-mqtt_client.subscribe("disaster/repeater/data")
-mqtt_client.loop_start()
+# ---------------- 30-MIN AGGREGATION ----------------
+def half_hour_aggregation():
+    while True:
+        time.sleep(1800)
 
-# -------------------------------
-# FLASK ROUTES
-# -------------------------------
-@app.route("/")
-def index():
-    return render_template("index.html")
+        local_copy = minute_buffer.copy()
+        minute_buffer.clear()
 
+        for node_id, records in local_copy.items():
+            if not records:
+                continue
+
+            soils = [r["soil"] for r in records]
+            vibs = [r["vib"] for r in records]
+            flames = [r["flame"] for r in records]
+
+            soil_avg = np.mean(soils)
+            vib_avg = np.mean(vibs)
+            vib_max = np.max(vibs)
+            flame_avg = np.mean(flames)
+            flame_max = np.max(flames)
+
+            lat = records[-1]["lat"]
+            lon = records[-1]["lon"]
+
+            # Simple automatic labeling logic
+            label = 1 if flame_max > 2500 or vib_max > 3 else 0
+
+            with open(CSV_FILE, "a", newline="") as f:
+                writer = csv.writer(f)
+                writer.writerow([
+                    datetime.now().strftime("%Y-%m-%d %H:%M"),
+                    node_id,
+                    lat,
+                    lon,
+                    round(soil_avg, 2),
+                    round(vib_avg, 3),
+                    round(vib_max, 3),
+                    round(flame_avg, 2),
+                    round(flame_max, 2),
+                    label
+                ])
+
+        print("30-min data saved.")
+
+# ---------------- AUTO ML RETRAINING ----------------
+def retrain_model():
+    global model
+
+    while True:
+        time.sleep(7200)  # Retrain every 2 hours
+
+        if not os.path.exists(CSV_FILE):
+            continue
+
+        df = pd.read_csv(CSV_FILE)
+
+        if len(df) < 20:   # Minimum data threshold
+            continue
+
+        X = df[[
+            "soil_avg",
+            "vib_avg",
+            "vib_max",
+            "flame_avg",
+            "flame_max"
+        ]]
+        y = df["label"]
+
+        new_model = RandomForestClassifier(n_estimators=100)
+        new_model.fit(X, y)
+
+        joblib.dump(new_model, MODEL_FILE)
+        model = new_model
+
+        print("Model retrained automatically.")
+
+# ---------------- API ----------------
 @app.route("/api/data")
 def api_data():
-    return jsonify(node_data)
+    return jsonify(latest_data)
 
-# -------------------------------
-# START SERVER
-# -------------------------------
+# ---------------- START SERVER ----------------
 if __name__ == "__main__":
+    threading.Thread(target=half_hour_aggregation, daemon=True).start()
+    threading.Thread(target=retrain_model, daemon=True).start()
     app.run(debug=True)
+

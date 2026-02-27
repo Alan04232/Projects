@@ -1,59 +1,98 @@
 <!DOCTYPE html>
 <html>
 <head>
-  <title>Disaster Prediction Map</title>
+    <title>IoT Node Alert Map</title>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
 
-  <link rel="stylesheet"
-        href="https://unpkg.com/leaflet/dist/leaflet.css" />
-  <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
-  <script src="https://unpkg.com/leaflet.heat/dist/leaflet-heat.js"></script>
+    <!-- Leaflet CSS -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
 
-  <style>
-    body { margin:0; }
-    #map { height:100vh; width:100vw; }
-  </style>
+    <style>
+        body { margin:0; padding:0; }
+        #map { height:100vh; width:100%; }
+        .legend {
+            background:white;
+            padding:10px;
+            line-height:18px;
+            color:#333;
+            font-size:14px;
+        }
+        .legend i {
+            width:14px;
+            height:14px;
+            float:left;
+            margin-right:8px;
+            opacity:0.9;
+        }
+    </style>
 </head>
-
 <body>
+
 <div id="map"></div>
 
+<!-- Leaflet JS -->
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
 <script>
-const map = L.map("map").setView([10.04, 76.35], 10);
+    // Initialize map (center Kerala default)
+    var map = L.map('map').setView([9.2, 76.5], 8);
 
-L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
-  attribution: "© OpenStreetMap"
-}).addTo(map);
+    // OpenStreetMap layer
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        attribution: '© OpenStreetMap'
+    }).addTo(map);
 
-let heatLayer;
+    var markers = {};
 
-function updateMap() {
-  fetch("/api/data")
-    .then(res => res.json())
-    .then(data => {
-      let heat = [];
+    function getColor(alert) {
+        if (alert == 0) return "green";
+        if (alert == 1) return "orange";
+        return "red";
+    }
 
-      for (let id in data) {
-        let n = data[id];
-        heat.push([n.lat, n.lon, n.probability / 100]);
-      }
+    function updateMarkers(data) {
+        data.forEach(node => {
+            var color = getColor(node.alert);
 
-      if (heatLayer) map.removeLayer(heatLayer);
+            if (markers[node.node_id]) {
+                markers[node.node_id].setLatLng([node.lat, node.lon]);
+                markers[node.node_id].setStyle({color: color});
+            } else {
+                var marker = L.circleMarker([node.lat, node.lon], {
+                    radius: 10,
+                    color: color,
+                    fillColor: color,
+                    fillOpacity: 0.8
+                }).addTo(map);
 
-      heatLayer = L.heatLayer(heat, {
-        radius: 35,
-        blur: 20,
-        gradient: {
-          0.0: "green",
-          0.4: "yellow",
-          0.6: "orange",
-          0.8: "red"
-        }
-      }).addTo(map);
-    });
-}
+                marker.bindPopup(
+                    "<b>Node:</b> " + node.node_id + "<br>" +
+                    "<b>Alert:</b> " + node.alert + "<br>" +
+                    "<b>Lat:</b> " + node.lat + "<br>" +
+                    "<b>Lon:</b> " + node.lon
+                );
 
-setInterval(updateMap, 4000);
-updateMap();
+                markers[node.node_id] = marker;
+            }
+        });
+    }
+
+    function fetchData() {
+        fetch("/api/nodes")
+        .then(response => response.json())
+        .then(data => {
+            updateMarkers(data);
+        })
+        .catch(err => console.log(err));
+    }
+
+    // refresh every 3 seconds
+    setInterval(fetchData, 3000);
+
+    // initial load
+    fetchData();
 </script>
+
 </body>
 </html>
