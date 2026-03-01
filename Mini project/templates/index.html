@@ -9,27 +9,100 @@
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
 
     <style>
-        body { margin:0; padding:0; }
+        body { margin:0; padding:0; font-family: Arial, sans-serif; }
         #map { height:100vh; width:100%; }
+        
         .legend {
-            background:white;
-            padding:10px;
-            line-height:18px;
-            color:#333;
-            font-size:14px;
+            background: white;
+            padding: 15px;
+            line-height: 20px;
+            color: #333;
+            font-size: 14px;
+            border-radius: 5px;
+            box-shadow: 0 2px 5px rgba(0,0,0,0.2);
+            position: absolute;
+            bottom: 30px;
+            right: 10px;
+            z-index: 1000;
+            min-width: 150px;
         }
+        
+        .legend h4 {
+            margin: 0 0 10px 0;
+            color: #666;
+            font-size: 14px;
+            text-align: center;
+            border-bottom: 1px solid #ddd;
+            padding-bottom: 5px;
+        }
+        
+        .legend div {
+            margin-bottom: 5px;
+            display: flex;
+            align-items: center;
+        }
+        
         .legend i {
-            width:14px;
-            height:14px;
-            float:left;
-            margin-right:8px;
-            opacity:0.9;
+            width: 20px;
+            height: 20px;
+            margin-right: 8px;
+            border-radius: 50%;
+            display: inline-block;
+        }
+        
+        .status-bar {
+            position: absolute;
+            top: 10px;
+            right: 10px;
+            z-index: 1000;
+            background: white;
+            padding: 8px 15px;
+            border-radius: 20px;
+            box-shadow: 0 2px 5px rgba(0,0,0,0.2);
+            font-size: 12px;
+            color: #666;
+        }
+        
+        .status-bar.connected {
+            color: green;
+        }
+        
+        .status-bar.disconnected {
+            color: red;
+        }
+        
+        .refresh-btn {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            z-index: 1000;
+            background: white;
+            padding: 8px 15px;
+            border-radius: 20px;
+            box-shadow: 0 2px 5px rgba(0,0,0,0.2);
+            font-size: 12px;
+            border: none;
+            cursor: pointer;
+        }
+        
+        .refresh-btn:hover {
+            background: #f0f0f0;
         }
     </style>
 </head>
 <body>
 
 <div id="map"></div>
+
+<div class="legend">
+    <h4>Alert Levels</h4>
+    <div><i style="background:green;"></i> Normal (Alert 0)</div>
+    <div><i style="background:orange;"></i> Warning (Alert 1)</div>
+    <div><i style="background:red;"></i> Critical (Alert 2+)</div>
+</div>
+
+<div class="status-bar" id="statusBar">● Connected</div>
+<button class="refresh-btn" onclick="forceRefresh()">⟳ Refresh Now</button>
 
 <!-- Leaflet JS -->
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
@@ -40,10 +113,13 @@
 
     // OpenStreetMap layer
     L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-        attribution: '© OpenStreetMap'
+        attribution: '© OpenStreetMap Contributors'
     }).addTo(map);
 
     var markers = {};
+    var updateInterval;
+    var retryCount = 0;
+    const MAX_RETRIES = 3;
 
     function getColor(alert) {
         if (alert == 0) return "green";
@@ -51,47 +127,177 @@
         return "red";
     }
 
+    function validateCoordinates(lat, lon) {
+        return lat >= -90 && lat <= 90 && lon >= -180 && lon <= 180;
+    }
+
+    function updateStatus(connected, message) {
+        var statusBar = document.getElementById('statusBar');
+        if (connected) {
+            statusBar.className = 'status-bar connected';
+            statusBar.innerHTML = '● Connected - ' + (message || 'Live updates');
+            retryCount = 0;
+        } else {
+            statusBar.className = 'status-bar disconnected';
+            statusBar.innerHTML = '● Disconnected - ' + (message || 'Retrying...');
+        }
+    }
+
     function updateMarkers(data) {
+        // Validate data format
+        if (!data || !Array.isArray(data)) {
+            console.error('Invalid data format received:', data);
+            updateStatus(false, 'Invalid data format');
+            return;
+        }
+
+        // Create a Set of current node IDs for tracking
+        const currentNodeIds = new Set();
+        
+        // Process each node
         data.forEach(node => {
+            // Validate required fields
+            if (!node.node_id || typeof node.lat === 'undefined' || typeof node.lon === 'undefined') {
+                console.warn('Skipping invalid node data:', node);
+                return;
+            }
+
+            // Validate coordinates
+            if (!validateCoordinates(node.lat, node.lon)) {
+                console.warn('Invalid coordinates for node:', node.node_id, node.lat, node.lon);
+                return;
+            }
+
+            currentNodeIds.add(node.node_id);
             var color = getColor(node.alert);
+            
+            // Format popup content
+            var popupContent = `
+                <b>Node ID:</b> ${node.node_id}<br>
+                <b>Alert Level:</b> ${node.alert} (${color})<br>
+                <b>Latitude:</b> ${node.lat.toFixed(6)}<br>
+                <b>Longitude:</b> ${node.lon.toFixed(6)}<br>
+                <b>Last Updated:</b> ${new Date().toLocaleTimeString()}
+            `;
 
             if (markers[node.node_id]) {
+                // Update existing marker
                 markers[node.node_id].setLatLng([node.lat, node.lon]);
-                markers[node.node_id].setStyle({color: color});
+                markers[node.node_id].setStyle({
+                    color: color,
+                    fillColor: color
+                });
+                markers[node.node_id].setPopupContent(popupContent);
             } else {
+                // Create new marker
                 var marker = L.circleMarker([node.lat, node.lon], {
                     radius: 10,
                     color: color,
+                    weight: 2,
                     fillColor: color,
                     fillOpacity: 0.8
                 }).addTo(map);
 
-                marker.bindPopup(
-                    "<b>Node:</b> " + node.node_id + "<br>" +
-                    "<b>Alert:</b> " + node.alert + "<br>" +
-                    "<b>Lat:</b> " + node.lat + "<br>" +
-                    "<b>Lon:</b> " + node.lon
-                );
-
+                marker.bindPopup(popupContent);
                 markers[node.node_id] = marker;
             }
         });
+
+        // Remove markers for nodes that no longer exist
+        Object.keys(markers).forEach(nodeId => {
+            if (!currentNodeIds.has(nodeId)) {
+                map.removeLayer(markers[nodeId]);
+                delete markers[nodeId];
+                console.log('Removed stale marker for node:', nodeId);
+            }
+        });
+
+        updateStatus(true, `${data.length} nodes tracked`);
     }
 
     function fetchData() {
         fetch("/api/nodes")
-        .then(response => response.json())
+        .then(response => {
+            if (!response.ok) {
+                throw new Error(`HTTP error! status: ${response.status}`);
+            }
+            return response.json();
+        })
         .then(data => {
             updateMarkers(data);
         })
-        .catch(err => console.log(err));
+        .catch(err => {
+            console.log('Fetch error:', err);
+            retryCount++;
+            
+            if (retryCount >= MAX_RETRIES) {
+                updateStatus(false, 'Connection failed - check API');
+            } else {
+                updateStatus(false, `Retry ${retryCount}/${MAX_RETRIES}`);
+            }
+        });
     }
 
-    // refresh every 3 seconds
-    setInterval(fetchData, 3000);
+    function forceRefresh() {
+        updateStatus(false, 'Refreshing...');
+        fetchData();
+    }
 
-    // initial load
+    // Handle page visibility to prevent unnecessary updates
+    document.addEventListener('visibilitychange', function() {
+        if (document.hidden) {
+            if (updateInterval) {
+                clearInterval(updateInterval);
+                updateInterval = null;
+                updateStatus(false, 'Updates paused');
+            }
+        } else {
+            if (!updateInterval) {
+                updateInterval = setInterval(fetchData, 3000);
+                fetchData(); // Immediate refresh when visible
+                updateStatus(true, 'Resumed updates');
+            }
+        }
+    });
+
+    // Handle online/offline events
+    window.addEventListener('online', function() {
+        updateStatus(false, 'Connection restored');
+        fetchData();
+    });
+
+    window.addEventListener('offline', function() {
+        updateStatus(false, 'Offline mode');
+    });
+
+    // Start periodic updates
+    updateInterval = setInterval(fetchData, 3000);
+
+    // Initial load with retry logic
     fetchData();
+
+    // Cleanup on page unload
+    window.addEventListener('beforeunload', function() {
+        if (updateInterval) {
+            clearInterval(updateInterval);
+        }
+    });
+
+    // Optional: Add map click handler to show coordinates
+    map.on('click', function(e) {
+        console.log('Map clicked at:', e.latlng.lat, e.latlng.lng);
+    });
+
+    // Optional: Add zoom control to see more details
+    map.on('zoomend', function() {
+        var zoom = map.getZoom();
+        Object.values(markers).forEach(marker => {
+            // Adjust marker size based on zoom level
+            var newRadius = Math.max(5, Math.min(15, zoom - 5));
+            marker.setRadius(newRadius);
+        });
+    });
+
 </script>
 
 </body>
