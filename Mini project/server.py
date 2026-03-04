@@ -149,13 +149,9 @@ def load_or_init_model():
         joblib.dump(clf, MODEL_PATH)
         log.info("Seed model saved to %s", MODEL_PATH)
     return clf
-
 # Global model (replaced atomically on retrain)
 model = load_or_init_model()
-
-# ─────────────────────────────────────────────
 # PREDICTION HELPERS
-# ─────────────────────────────────────────────
 def ml_predict(features: list) -> float:
     global model
     if model is None:
@@ -317,28 +313,36 @@ app = Flask(__name__)
 
 @app.route("/node-data", methods=["POST"])
 def receive_node_data():
-    data = request.json
-    log.info("RECEIVED FROM GATEWAY: %s", data)
+    try:
+        data = request.get_json(force=True)   # <-- FORCE JSON PARSE
+        if data is None:
+            return jsonify({"error": "No JSON received"}), 400
 
-    node_id = data["node_id"]
-    flame   = data.get("flame", {"front": 0, "right": 0, "back": 0, "left": 0})
+        log.info("RECEIVED FROM GATEWAY: %s", data)
 
-    record = {
-        "soil":     data["soil_moisture"],
-        "vib_x":    data["vib_x"],
-        "vib_y":    data["vib_y"],
-        "vib_z":    data["vib_z"],
-        "humidity": data.get("humidity", 70),
-        "lat":      data["lat"],
-        "lon":      data["lon"],
-        "flame":    flame,
-        "time":     datetime.now(),
-    }
+        node_id = data["node_id"]
+        flame   = data.get("flame", {"front": 0, "right": 0, "back": 0, "left": 0})
 
-    with state_lock:
-        raw_buffer.setdefault(node_id, []).append(record)
+        record = {
+            "soil":     data["soil_moisture"],
+            "vib_x":    data["vib_x"],
+            "vib_y":    data["vib_y"],
+            "vib_z":    data["vib_z"],
+            "humidity": data.get("humidity", 70),
+            "lat":      data["lat"],
+            "lon":      data["lon"],
+            "flame":    flame,
+            "time":     datetime.now(),
+        }
 
-    return jsonify({"status": "received"})
+        with state_lock:
+            raw_buffer.setdefault(node_id, []).append(record)
+
+        return jsonify({"status": "received"}), 200
+
+    except Exception as e:
+        log.error("POST /node-data error: %s", e)
+        return jsonify({"error": str(e)}), 400
 
 @app.route("/api/data")
 def api_data():

@@ -8,31 +8,14 @@ const char* ssid = "N00384";
 const char* password = "01010123";
 const char* serverURL = "http://192.168.137.1:5000/node-data";
 
-// ================= Packet =================
-typedef struct {
-  int node_id;
-  float lat;
-  float lon;
-  int soil;
-  float vib_x;
-  float vib_y;
-  float vib_z;
-  float humidity;
-  float dist;
-  bool flame;
-} NodePacket;
-
+// ================= Globals =================
 volatile bool newPacket = false;
-NodePacket incoming;
+char incomingJSON[250];   // fixed buffer (more stable than String)
 
 // ================= ESP-NOW RECEIVE =================
 void onReceive(const esp_now_recv_info *info, const uint8_t *data, int len) {
 
-  if (len != sizeof(NodePacket)) return;
-
-  memcpy(&incoming, data, sizeof(incoming));
-
-  Serial.println("\n===== DATA RECEIVED FROM NODE =====");
+  Serial.println("\n===== JSON RECEIVED FROM NODE =====");
 
   Serial.print("Sender MAC: ");
   for (int i = 0; i < 6; i++) {
@@ -41,12 +24,17 @@ void onReceive(const esp_now_recv_info *info, const uint8_t *data, int len) {
   }
   Serial.println();
 
-  Serial.printf("Node: %d  Lat: %.5f  Lon: %.5f\n", incoming.node_id, incoming.lat, incoming.lon);
-  Serial.printf("Soil: %d  Vib: %.3f %.3f %.3f\n", incoming.soil, incoming.vib_x, incoming.vib_y, incoming.vib_z);
-  Serial.printf("Hum: %.1f  Dist: %.1f  Flame: %d\n",
-                incoming.humidity, incoming.dist, incoming.flame);
+  // Copy data safely and remove possible NULL terminator
+  int copyLen = len;
+  if (copyLen >= sizeof(incomingJSON))
+      copyLen = sizeof(incomingJSON) - 1;
 
-  Serial.println("==================================");
+  memcpy(incomingJSON, data, copyLen);
+  incomingJSON[copyLen] = '\0';   // ensure proper string termination
+
+  Serial.println("Raw JSON:");
+  Serial.println(incomingJSON);
+  Serial.println("==============================");
 
   newPacket = true;
 }
@@ -94,24 +82,11 @@ void setup() {
 void loop() {
 
   if (!newPacket) return;
+
   newPacket = false;
 
-  // ===== Create valid JSON =====
-  String payload = "{";
-  payload += "\"node_id\":" + String(incoming.node_id) + ",";
-  payload += "\"lat\":" + String(incoming.lat, 5) + ",";
-  payload += "\"lon\":" + String(incoming.lon, 5) + ",";
-  payload += "\"soil_moisture\":" + String(incoming.soil) + ",";
-  payload += "\"vib_x\":" + String(incoming.vib_x, 3) + ",";
-  payload += "\"vib_y\":" + String(incoming.vib_y, 3) + ",";
-  payload += "\"vib_z\":" + String(incoming.vib_z, 3) + ",";
-  payload += "\"humidity\":" + String(incoming.humidity, 1) + ",";
-  payload += "\"distance\":" + String(incoming.dist, 1) + ",";
-  payload += "\"flame\":" + String(incoming.flame ? "true" : "false");
-  payload += "}";
-
   Serial.println("\n----- JSON SENT TO SERVER -----");
-  Serial.println(payload);
+  Serial.println(incomingJSON);
 
   if (WiFi.status() == WL_CONNECTED) {
 
@@ -119,7 +94,11 @@ void loop() {
     http.begin(serverURL);
     http.addHeader("Content-Type", "application/json");
 
-    int code = http.POST(payload);
+    // Send exact byte length (NO extra NULL)
+    int code = http.POST(
+      (uint8_t*)incomingJSON,
+      strlen(incomingJSON)
+    );
 
     Serial.print("Server response: ");
     Serial.println(code);

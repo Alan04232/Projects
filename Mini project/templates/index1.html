@@ -435,7 +435,7 @@
   var firstLoad = true;
 
   function fetchData() {
-    fetch('/api/nodes')
+    fetch('/api/realtime')
       .then(function (response) {
         if (!response.ok) {
           throw new Error('Server returned HTTP ' + response.status);
