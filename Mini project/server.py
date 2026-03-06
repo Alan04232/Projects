@@ -89,19 +89,19 @@ CSV_HEADER = FEATURE_COLS + [
 
 def ensure_csv():
     """Create CSV with header if it doesn't exist or is empty."""
-    if not Path(TRAINING_CSV).exists() or Path(TRAINING_CSV).stat().st_size == 0:
+    if not Path(r"D:\workspace\training_data.csv").exists() or Path(r"D:\workspace\training_data.csv").stat().st_size == 0:
         df_seed = pd.DataFrame(SEED_DATA)
         # add placeholder columns
         for col in ["fire_detected", "spread_direction", "node_id", "lat", "lon"]:
             df_seed[col] = None
         df_seed["timestamp"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        df_seed.to_csv(TRAINING_CSV, index=False)
-        log.info("Created %s with %d seed rows", TRAINING_CSV, len(df_seed))
+        df_seed.to_csv(r"D:\workspace\training_data.csv", index=False)
+        log.info("Created %s with %d seed rows", r"D:\workspace\training_data.csv", len(df_seed))
 
 def append_to_csv(row: dict):
     """Append a single prediction row to the training CSV."""
-    file_exists = Path(TRAINING_CSV).exists()
-    with open(TRAINING_CSV, "a", newline="") as f:
+    file_exists = Path(r"D:\workspace\training_data.csv").exists()
+    with open(r"D:\workspace\training_data.csv", "a", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=CSV_HEADER, extrasaction="ignore")
         if not file_exists:
             writer.writeheader()
@@ -109,7 +109,7 @@ def append_to_csv(row: dict):
 
 def load_training_df() -> pd.DataFrame:
     ensure_csv()
-    return pd.read_csv(TRAINING_CSV)
+    return pd.read_csv(r"D:\workspace\training_data.csv")
 
 # ─────────────────────────────────────────────
 # MODEL TRAINING
@@ -411,7 +411,7 @@ def api_label():
 
 @app.route("/")
 def index():
-    return render_template("index1.html")
+    return render_template("index.html")
 
 # ─────────────────────────────────────────────
 # ENTRY POINT
