@@ -11,7 +11,6 @@ Features:
 • Provides REST APIs for dashboard consumption
 • Improved error handling, validation, and logging
 """
-
 import os
 import csv
 import json
@@ -22,7 +21,6 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional
 from dataclasses import dataclass, asdict
-
 import numpy as np
 import pandas as pd
 import requests
@@ -31,19 +29,16 @@ from flask import Flask, jsonify, request, render_template
 from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier, VotingClassifier
 from sklearn.preprocessing import StandardScaler
 from sklearn.model_selection import cross_val_score
-
 # ─────────────────────────────────────────────
 # CONFIGURATION
 # ─────────────────────────────────────────────
 MODEL_PATH = r"D:\workspace\Projects\Mini project\model.pkl"
 SCALER_PATH = r"D:\workspace\Projects\Mini project\scaler.pkl"
 TRAINING_CSV = r"D:\workspace\Projects\Mini project\training_data.csv"
-
 PREDICT_INTERVAL = 15 * 60  # 15 minutes
 RETRAIN_INTERVAL = 24 * 60 * 60  # 24 hours
 MIN_ROWS_RETRAIN = 20
 SOIL_FETCH_INTERVAL = 60 * 60  # Fetch soil data every hour
-
 # API Keys (set via environment variables for security)
 WEATHER_API_KEY = os.getenv("WEATHER_API_KEY", "your_api_key_here")
 WEATHER_API_URL = "https://api.weatherapi.com/v1/current.json"  # Free tier available
