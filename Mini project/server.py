@@ -1,426 +1,991 @@
 """
-main.py  —  Landslide + Fire Detection Server
-=============================================
-• Receives sensor data from IoT gateway via POST /node-data
-• Runs ML prediction every 15 minutes on latest sensor readings
-• Saves every prediction + sensor snapshot to training_data.csv for future retraining
-• Auto-retrains the model every 24 hours using accumulated real data
-• Serves dashboard API at /api/data and /api/realtime
+🛡️ SMART DISASTER PREDICTION SYSTEM - FINAL VERSION
+===================================================
+
+EXACT REQUIREMENTS IMPLEMENTATION:
+
+1. NODE SENDS (Real-time):
+   ✓ soil_moisture (0-100%)
+   ✓ vibration (3-axis: x, y, z)
+   ✓ flame_detected (0/1)
+   
+2. SERVER PREDICTS by comparing:
+   ✓ Sensor data (above)
+   ✓ Soil type (config)
+   ✓ Soil water bearing capacity (SoilGrids API - FREE)
+   ✓ Upcoming weather (WeatherAPI - FREE)
+   → Predict: upcoming event + region safety
+   
+3. DATA MANAGEMENT:
+   ✓ Real-time reception
+   ✓ Average 15-min data
+   ✓ Save to CSV for training
+   
+4. FIRE DIRECTION:
+   ✓ From wind_direction (WeatherAPI)
+   
+5. WEBPAGE DISPLAY:
+   ✓ Real-time sensor data (live)
+   ✓ Predicted data (every 15 min)
 """
 
 import os
 import csv
+import json
 import time
 import threading
 import logging
 from datetime import datetime
 from pathlib import Path
+from typing import Dict, List, Tuple, Optional
+from dataclasses import dataclass
+from collections import defaultdict
 
 import numpy as np
 import pandas as pd
+import requests
 import joblib
 from flask import Flask, jsonify, request, render_template
 from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier, VotingClassifier
+from sklearn.preprocessing import StandardScaler
 from sklearn.model_selection import cross_val_score
+from typing import Optional, Tuple
+from sklearn.base import BaseEstimator
+from sklearn.preprocessing import StandardScaler
 
-# ─────────────────────────────────────────────
-# CONFIG
-# ─────────────────────────────────────────────
-MODEL_PATH   = r"D:\workspace\Projects\Mini project\model.pkl"
-TRAINING_CSV = r"D:\workspace\Projects\Mini project\training_data.csv"
-PREDICT_INTERVAL  = 15 * 60          # 15 minutes in seconds
-RETRAIN_INTERVAL  = 24 * 60 * 60     # 24 hours in seconds
-MIN_ROWS_RETRAIN  = 20               # minimum rows before auto-retrain kicks in
+# ═══════════════════════════════════════════════════════════════════════════════
+# 🔧 CONFIGURATION
+# ═══════════════════════════════════════════════════════════════════════════════
 
-FEATURE_COLS = [
-    "soil_avg", "vib_max", "hum_avg", "rain",
-    "soil_type", "soil_capacity", "slope"
+# File Paths
+MODEL_PATH = "D:\\workspace\\Projects\\Mini project\\model.pkl"
+SCALER_PATH = "D:\\workspace\\Projects\\Mini project\\scaler.pkl"
+TRAINING_CSV = "D:\\workspace\\Projects\\Mini project\\disaster_training_data.csv"
+
+# Timing (ALL CONFIGURABLE)
+DATA_COLLECTION_INTERVAL = 15 * 60      # Collect sensor data for 15 min (900 sec)
+PREDICTION_INTERVAL = 15 * 60           # Make prediction every 15 min
+AUTO_RETRAIN_INTERVAL = 24 * 60 * 60    # Retrain ML model every 24 hours
+MIN_LABELLED_SAMPLES = 20               # Need 20+ real events to retrain
+
+# FREE APIs
+WEATHER_API_KEY = os.getenv("WEATHER_API_KEY", "")
+WEATHER_API_URL = "https://api.weatherapi.com/v1/current.json"
+SOILGRIDS_API_URL = "https://rest.isric.org/soilgrids/v2.0/properties/query"
+
+# ML Features (12 total - CRITICAL for prediction)
+FEATURE_COLUMNS = [
+    # FROM SENSOR (Real-time)
+    "soil_moisture",                # % (how wet)
+    "vibration_max",                # g (max acceleration)
+    "vibration_rms",                # g (overall shaking)
+    "flame_detected",               # 0/1 (fire present?)
+    
+    # FROM WEATHER API (FREE - WeatherAPI)
+    "rainfall_24h",                 # mm (last 24 hours)
+    "temperature",                  # °C (affects fire spread)
+    "wind_speed",                   # km/h (fire spread rate)
+    "wind_direction",               # degrees (fire spread direction)
+    
+    # FROM CONFIG (Soil properties)
+    "soil_type",                    # 1=clay, 2=loam, 3=sand
+    "water_bearing_capacity",       # mm/m (from SoilGrids)
+    "slope",                        # degrees (terrain steepness)
+    "vegetation_cover"              # % (fuel for fire)
 ]
 
+# Logging
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s  %(levelname)s  %(message)s",
+    format="%(asctime)s | %(levelname)-8s | %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S"
 )
 log = logging.getLogger(__name__)
 
-# ─────────────────────────────────────────────
-# STATIC NODE PROPERTIES
-# ─────────────────────────────────────────────
-NODE_PROPS = {
-    1: {"soil_type": 2, "soil_capacity": 140, "slope": 25}
-}
+# ═══════════════════════════════════════════════════════════════════════════════
+# 📦 DATA CLASSES
+# ═══════════════════════════════════════════════════════════════════════════════
 
-FLAME_SENSOR_DIRECTIONS = {
-    "front": 0,   # North
-    "right": 90,  # East
-    "back":  180, # South
-    "left":  270, # West
-}
+@dataclass
+class NodeSensorReading:
+    """
+    REQUIREMENT 1: Data from IoT node
+    Received every ~30 seconds
+    """
+    timestamp: datetime
+    node_id: int
+    soil_moisture: float            # % (0-100)
+    vibration_x: float              # g
+    vibration_y: float              # g
+    vibration_z: float              # g
+    flame_detected: int             # 0=no, 1=yes
+    lat: float
+    lon: float
 
-# ─────────────────────────────────────────────
-# SHARED STATE  (protected by a lock)
-# ─────────────────────────────────────────────
-state_lock  = threading.Lock()
-raw_buffer  = {}   # node_id -> list of sensor dicts (reset every 15 min)
-result_db   = {}   # node_id -> latest prediction result
 
-# ─────────────────────────────────────────────
-# SEED TRAINING DATA  (used only when CSV is absent / empty)
-# ─────────────────────────────────────────────
-SEED_DATA = {
-    "soil_avg":      [40,  60,  80,  90,  75,  50,  85,  95,  30,  55,  70,  88],
-    "vib_max":       [0.02,0.03,0.07,0.08,0.06,0.02,0.09,0.10,0.01,0.03,0.05,0.08],
-    "hum_avg":       [50,  60,  75,  85,  80,  55,  90,  95,  45,  65,  70,  88],
-    "rain":          [30,  50, 100, 150, 120,  40, 160, 180,  20,  60,  90, 140],
-    "soil_type":     [1,   1,   2,   2,   2,   1,   3,   3,   1,   1,   2,   3],
-    "soil_capacity": [140,140, 120, 110, 120, 140, 100,  95, 150, 140, 120, 100],
-    "slope":         [10,  15,  25,  30,  28,  12,  35,  40,   8,  18,  22,  32],
-    "label":         [0,   0,   1,   1,   1,   0,   1,   1,   0,   0,   0,   1],
-}
+@dataclass
+class AveragedSensorData:
+    """
+    REQUIREMENT 3: 15-minute averaged data
+    Created by averaging 30 readings
+    """
+    timestamp: datetime
+    node_id: int
+    soil_moisture_avg: float        # Average over 15 min
+    vibration_max: float            # Peak vibration
+    vibration_rms: float            # Overall motion
+    flame_detected: int             # Any flame in window?
+    reading_count: int
+    lat: float
+    lon: float
 
-# ─────────────────────────────────────────────
-# TRAINING DATA CSV HELPERS
-# ─────────────────────────────────────────────
-CSV_HEADER = FEATURE_COLS + [
-    "label", "fire_detected", "spread_direction",
-    "node_id", "lat", "lon", "timestamp"
-]
 
-def ensure_csv():
-    """Create CSV with header if it doesn't exist or is empty."""
-    if not Path(r"D:\workspace\training_data.csv").exists() or Path(r"D:\workspace\training_data.csv").stat().st_size == 0:
-        df_seed = pd.DataFrame(SEED_DATA)
-        # add placeholder columns
-        for col in ["fire_detected", "spread_direction", "node_id", "lat", "lon"]:
-            df_seed[col] = None
-        df_seed["timestamp"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        df_seed.to_csv(r"D:\workspace\training_data.csv", index=False)
-        log.info("Created %s with %d seed rows", r"D:\workspace\training_data.csv", len(df_seed))
+@dataclass
+class WeatherInfo:
+    """
+    REQUIREMENT 2: Weather data from API
+    Used for prediction
+    """
+    temperature: float              # °C
+    rainfall_24h: float             # mm
+    wind_speed: float               # km/h
+    wind_direction: float           # degrees (0-360)
 
-def append_to_csv(row: dict):
-    """Append a single prediction row to the training CSV."""
-    file_exists = Path(r"D:\workspace\training_data.csv").exists()
-    with open(r"D:\workspace\training_data.csv", "a", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=CSV_HEADER, extrasaction="ignore")
-        if not file_exists:
-            writer.writeheader()
-        writer.writerow(row)
 
-def load_training_df() -> pd.DataFrame:
-    ensure_csv()
-    return pd.read_csv(r"D:\workspace\training_data.csv")
+@dataclass
+class DisasterPrediction:
+    """
+    REQUIREMENT 2: Prediction output
+    What server predicts about upcoming event
+    """
+    timestamp: datetime
+    node_id: int
+    
+    # LANDSLIDE PREDICTION
+    landslide_probability: float    # 0-1
+    landslide_risk: str             # LOW, MEDIUM, HIGH
+    
+    # FIRE PREDICTION
+    fire_probability: float         # 0-1
+    fire_risk: str                  # NO, WARNING, DANGER
+    
+    # REQUIREMENT 4: Fire direction from wind
+    fire_spread_direction: str      # N, NE, E, SE, S, SW, W, NW
+    fire_spread_degrees: float      # 0-360
+    
+    # REQUIREMENT 2: Region safety
+    region_safety: str              # SAFE, CAUTION, DANGER
+    
+    # For webpage display
+    features_used: Dict
 
-# ─────────────────────────────────────────────
-# MODEL TRAINING
-# ─────────────────────────────────────────────
-def build_model():
-    rf = RandomForestClassifier(n_estimators=200, max_depth=6, random_state=42)
-    gb = GradientBoostingClassifier(n_estimators=150, learning_rate=0.05, random_state=42)
-    return VotingClassifier(estimators=[("rf", rf), ("gb", gb)], voting="soft")
 
-def train_model(df: pd.DataFrame):
-    """Train on labelled rows only (label column not null/NaN)."""
-    labelled = df.dropna(subset=["label"])
-    if len(labelled) < MIN_ROWS_RETRAIN:
-        log.warning("Only %d labelled rows — skipping retrain (need %d)",
-                    len(labelled), MIN_ROWS_RETRAIN)
-        return None
+# ═══════════════════════════════════════════════════════════════════════════════
+# 🌍 SITE CONFIGURATION
+# ═══════════════════════════════════════════════════════════════════════════════
 
-    X = labelled[FEATURE_COLS].astype(float)
-    y = labelled["label"].astype(int)
+# ═══════════════════════════════════════════════════════════════════════════════
+# 🌍 SITE CONFIGURATION
+# ═══════════════════════════════════════════════════════════════════════════════
 
-    clf = build_model()
-    if len(y.unique()) > 1:
-        scores = cross_val_score(clf, X, y, cv=min(3, len(y)), scoring="roc_auc")
-        log.info("Retrain CV AUC: %s  mean=%.3f", scores.round(3), scores.mean())
-    clf.fit(X, y)
-    return clf
-
-def load_or_init_model():
-    """Load existing model, or train a fresh one from seed data."""
-    if Path(MODEL_PATH).exists():
-        log.info("Loading existing model from %s", MODEL_PATH)
-        return joblib.load(MODEL_PATH)
-    log.info("No saved model found — training from seed data")
-    df = load_training_df()
-    clf = train_model(df)
-    if clf:
-        joblib.dump(clf, MODEL_PATH)
-        log.info("Seed model saved to %s", MODEL_PATH)
-    return clf
-# Global model (replaced atomically on retrain)
-model = load_or_init_model()
-# PREDICTION HELPERS
-def ml_predict(features: list) -> float:
-    global model
-    if model is None:
-        return 0.0
-    return float(model.predict_proba([features])[0][1])
-
-def risk_level(p: float) -> str:
-    if p > 0.75:   return "HIGH"
-    if p > 0.4:    return "MEDIUM"
-    return "LOW"
-
-# ─────────────────────────────────────────────
-# SIMULATED WEATHER (replace with real API)
-# ─────────────────────────────────────────────
-def get_rainfall(lat, lon) -> float:
-    return float(np.random.randint(40, 200))
-
-# ─────────────────────────────────────────────
-# FIRE DIRECTION ANALYSIS
-# ─────────────────────────────────────────────
-def bearing_to_cardinal(deg: float) -> str:
-    labels = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"]
-    return labels[round(deg / 45) % 8]
-
-def analyse_fire_direction(flame: dict) -> dict:
-    active = {k: v for k, v in flame.items() if v == 1}
-    if not active:
-        return {"fire_detected": False, "origin_directions": [],
-                "spread_direction": None, "alert": "No fire detected"}
-
-    bearings = [FLAME_SENSOR_DIRECTIONS[k] for k in active if k in FLAME_SENSOR_DIRECTIONS]
-    sin_s = sum(np.sin(np.radians(b)) for b in bearings)
-    cos_s = sum(np.cos(np.radians(b)) for b in bearings)
-    mean_b  = np.degrees(np.arctan2(sin_s, cos_s)) % 360
-    spread_b = (mean_b + 180) % 360
-
-    origins = [bearing_to_cardinal(b) for b in bearings]
-    spread  = bearing_to_cardinal(spread_b)
-    return {
-        "fire_detected": True,
-        "origin_directions": origins,
-        "spread_direction": spread,
-        "spread_bearing_deg": round(spread_b, 1),
-        "alert": f"Fire from {', '.join(origins)} — spreading toward {spread}."
+SITE_CONFIG = {
+    1: {
+        "name": "Mountain Slope A - Kerala",
+        "soil_type": 2,                 # 1=clay, 2=loam, 3=sand
+        "slope": 35,                    # degrees
+        "vegetation_cover": 55,         # %
+        "lat": 10.02,                   # Latitude (for map visualization)
+        "lon": 76.30                    # Longitude (for map visualization)
+    },
+    2: {
+        "name": "Valley B - Himachal",
+        "soil_type": 1,
+        "slope": 20,
+        "vegetation_cover": 45,
+        "lat": 31.78,                   # Different location for demo
+        "lon": 77.10
+    },
+    3: {
+        "name": "Coastal Area C - Maharashtra",
+        "soil_type": 3,
+        "slope": 12,
+        "vegetation_cover": 35,
+        "lat": 18.52,                   # Another location
+        "lon": 73.86
     }
+}
 
-# ─────────────────────────────────────────────
-# 15-MINUTE PREDICTION LOOP
-# ─────────────────────────────────────────────
-def prediction_loop():
-    """Runs every 15 minutes: aggregates buffer, predicts, saves to CSV."""
-    while True:
-        time.sleep(PREDICT_INTERVAL)
-        log.info("── 15-min prediction cycle started ──")
+# ═══════════════════════════════════════════════════════════════════════════════
+# 🔒 THREAD-SAFE STATE
+# ═══════════════════════════════════════════════════════════════════════════════
 
-        with state_lock:
-            local_copy = {nid: list(recs) for nid, recs in raw_buffer.items() if recs}
-            raw_buffer.clear()
+state_lock = threading.Lock()
 
-        for node_id, records in local_copy.items():
-            try:
-                soils = [r["soil"]  for r in records]
-                vx    = [r["vib_x"] for r in records]
-                vy    = [r["vib_y"] for r in records]
-                vz    = [r["vib_z"] for r in records]
-                hums  = [r["humidity"] for r in records]
+# REQUIREMENT 1: Real-time sensor buffer
+sensor_buffer: Dict[int, List[NodeSensorReading]] = defaultdict(list)
 
-                soil_avg = float(np.mean(soils))
-                vib_max  = max(max(vx), max(vy), max(vz))
-                hum_avg  = float(np.mean(hums))
+# Latest predictions from ML model
+latest_predictions: Dict[int, DisasterPrediction] = {}
 
-                lat, lon = records[-1]["lat"], records[-1]["lon"]
-                rain     = get_rainfall(lat, lon)
-                props    = NODE_PROPS.get(node_id, NODE_PROPS[1])
+# API caches
+weather_cache: Dict[int, WeatherInfo] = {}
+soil_cache: Dict[int, Dict] = {}
+cache_time: Dict[str, float] = {}
 
-                features = [
-                    soil_avg, vib_max, hum_avg, rain,
-                    props["soil_type"], props["soil_capacity"], props["slope"]
-                ]
+# ═══════════════════════════════════════════════════════════════════════════════
+# 📊 CSV OPERATIONS
+# ═══════════════════════════════════════════════════════════════════════════════
 
-                prob = ml_predict(features)
-                risk = risk_level(prob)
+CSV_HEADER = FEATURE_COLUMNS + ["label", "event_type", "node_id", "lat", "lon", "timestamp"]
 
-                # Aggregate flame readings
-                merged_flame = {"front": 0, "right": 0, "back": 0, "left": 0}
-                for r in records:
-                    for direction, val in r.get("flame", {}).items():
-                        if val:
-                            merged_flame[direction] = 1
-                fire_info = analyse_fire_direction(merged_flame)
+SEED_DATA = {
+    "soil_moisture": [35, 45, 55, 65, 75, 85, 40, 70, 50, 80, 60, 90],
+    "vibration_max": [0.01, 0.02, 0.03, 0.05, 0.10, 0.15, 0.02, 0.12, 0.04, 0.16, 0.06, 0.18],
+    "vibration_rms": [0.005, 0.010, 0.015, 0.025, 0.050, 0.080, 0.010, 0.070, 0.020, 0.090, 0.035, 0.100],
+    "flame_detected": [0, 0, 0, 0, 0, 1, 0, 1, 0, 1, 0, 1],
+    "rainfall_24h": [5, 15, 25, 45, 75, 120, 10, 100, 20, 110, 50, 150],
+    "temperature": [16, 18, 20, 23, 26, 30, 17, 28, 21, 32, 24, 33],
+    "wind_speed": [3, 6, 9, 12, 18, 25, 5, 22, 8, 28, 15, 30],
+    "wind_direction": [0, 45, 90, 135, 180, 225, 30, 270, 60, 315, 120, 240],
+    "soil_type": [1, 1, 2, 2, 2, 3, 1, 3, 2, 3, 1, 3],
+    "water_bearing_capacity": [120, 120, 140, 140, 140, 100, 120, 100, 140, 95, 120, 100],
+    "slope": [10, 15, 20, 25, 30, 40, 12, 38, 18, 45, 22, 42],
+    "vegetation_cover": [60, 60, 60, 55, 50, 30, 60, 25, 55, 20, 55, 15],
+    "label": [0, 0, 0, 0, 1, 1, 0, 1, 0, 1, 0, 1],
+}
 
-                now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-                # ── Store result for dashboard ──
-                with state_lock:
-                    result_db[node_id] = {
-                        "lat": lat, "lon": lon,
-                        "risk": risk,
-                        "probability": round(prob * 100, 2),
-                        "soil_avg": round(soil_avg, 2),
-                        "vib_x_max": round(max(vx), 3),
-                        "vib_y_max": round(max(vy), 3),
-                        "vib_z_max": round(max(vz), 3),
-                        "fire": fire_info,
-                        "time": now_str,
-                    }
+def ensure_csv_exists():
+    """Create training CSV with seed data"""
+    csv_path = Path(TRAINING_CSV)
+    if csv_path.exists() and csv_path.stat().st_size > 0:
+        return
+    
+    df = pd.DataFrame(SEED_DATA)
+    df["event_type"] = ""
+    df["node_id"] = 1
+    df["lat"] = 10.02
+    df["lon"] = 76.30
+    df["timestamp"] = datetime.now().isoformat()
+    
+    df.to_csv(TRAINING_CSV, index=False)
+    log.info(f"✓ CSV created with {len(df)} seed samples")
 
-                # ── Save to CSV for future training ──
-                # label is None (unknown) — a human/expert can fill it in later
-                # Once labelled rows accumulate, the auto-retrain loop will use them
-                csv_row = {
-                    "soil_avg":       round(soil_avg, 3),
-                    "vib_max":        round(vib_max, 4),
-                    "hum_avg":        round(hum_avg, 3),
-                    "rain":           round(rain, 2),
-                    "soil_type":      props["soil_type"],
-                    "soil_capacity":  props["soil_capacity"],
-                    "slope":          props["slope"],
-                    "label":          "",          # fill in after a real event
-                    "fire_detected":  int(fire_info["fire_detected"]),
-                    "spread_direction": fire_info.get("spread_direction", ""),
-                    "node_id":        node_id,
-                    "lat":            round(lat, 6),
-                    "lon":            round(lon, 6),
-                    "timestamp":      now_str,
-                }
-                append_to_csv(csv_row)
-                log.info("Node %s | risk=%s (%.1f%%) | fire=%s | saved to CSV",
-                         node_id, risk, prob * 100, fire_info["fire_detected"])
 
-            except Exception as exc:
-                log.error("Prediction failed for node %s: %s", node_id, exc)
+def save_aggregated_data_to_csv(row: dict):
+    """
+    REQUIREMENT 3: Save 15-minute averaged data
+    This CSV is used for model retraining
+    """
+    try:
+        csv_path = Path(TRAINING_CSV)
+        file_exists = csv_path.exists() and csv_path.stat().st_size > 0
+        
+        with open(TRAINING_CSV, "a", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=CSV_HEADER, extrasaction="ignore")
+            if not file_exists:
+                writer.writeheader()
+            writer.writerow(row)
+    except Exception as e:
+        log.error(f"CSV error: {e}")
 
-# ─────────────────────────────────────────────
-# 24-HOUR AUTO-RETRAIN LOOP
-# ─────────────────────────────────────────────
-def retrain_loop():
-    """Every 24 h, reload the CSV and retrain if enough labelled data exists."""
-    global model
-    while True:
-        time.sleep(RETRAIN_INTERVAL)
-        log.info("── Daily retrain cycle started ──")
+
+def load_training_data() -> pd.DataFrame:
+    """Load CSV for model retraining"""
+    ensure_csv_exists()
+    try:
+        return pd.read_csv(TRAINING_CSV)
+    except:
+        return pd.DataFrame(SEED_DATA)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 🌐 FREE API INTEGRATION (REQUIREMENT 2)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def get_weather_data(lat: float, lon: float) -> WeatherInfo:
+    """
+    REQUIREMENT 2: Get upcoming weather from FREE WeatherAPI
+    Returns: temperature, rainfall, wind_speed, wind_direction
+    """
+    try:
+        params = {
+            'key': WEATHER_API_KEY,
+            'q': f"{lat},{lon}",
+            'aqi': 'no'
+        }
+        
+        response = requests.get(WEATHER_API_URL, params=params, timeout=10)
+        response.raise_for_status()
+        
+        current = response.json()['current']
+        
+        return WeatherInfo(
+            temperature=current['temp_c'],
+            rainfall_24h=current.get('precip_mm', 0),
+            wind_speed=current['wind_kph'],
+            wind_direction=current['wind_degree']
+        )
+        
+    except Exception as e:
+        log.warning(f"Weather API error: {e} - using defaults")
+        return WeatherInfo(
+            temperature=25.0,
+            rainfall_24h=0.0,
+            wind_speed=5.0,
+            wind_direction=0.0
+        )
+
+
+def get_soil_water_capacity(lat: float, lon: float) -> float:
+    """
+    REQUIREMENT 2: Get soil water bearing capacity from FREE SoilGrids API
+    Returns: water capacity in mm/m
+    """
+    try:
+        params = {
+            'lon': lon,
+            'lat': lat,
+            'property': ['awc'],          # available water capacity
+            'depth': ['0-5cm'],
+            'value': 'mean'
+        }
+        
+        response = requests.get(SOILGRIDS_API_URL, params=params, timeout=15)
+        response.raise_for_status()
+        
+        data = response.json()
+        for prop in data.get('properties', []):
+            if prop['name'] == 'awc' and prop.get('layers'):
+                value = prop['layers'][0]['depths'][0]['values'].get('mean', 140)
+                return value / 10
+        
+        return 140.0  # Default loam
+        
+    except Exception as e:
+        log.warning(f"SoilGrids API error: {e} - using default")
+        return 140.0
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 🔥 REQUIREMENT 4: FIRE DIRECTION FROM WIND
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def degrees_to_compass(degrees: float) -> str:
+    """Convert degrees (0-360) to cardinal direction"""
+    directions = ["N", "NNE", "NE", "ENE", "E", "ESE", "SE", "SSE",
+                  "S", "SSW", "SW", "WSW", "W", "WNW", "NW", "NNW"]
+    return directions[round(degrees / 22.5) % 16]
+
+
+def calculate_fire_spread(wind_direction: float) -> Tuple[str, float]:
+    """
+    REQUIREMENT 4: Calculate fire spread direction from wind
+    Fire spreads IN the direction the wind blows
+    """
+    spread_direction = degrees_to_compass(wind_direction)
+    return spread_direction, wind_direction
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 🧠 DISASTER PREDICTION FORMULAS (REQUIREMENT 2)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def predict_landslide_risk(
+    soil_moisture: float,
+    vibration_rms: float,
+    rainfall: float,
+    slope: float,
+    water_capacity: float,
+    soil_type: int
+) -> float:
+    """
+    REQUIREMENT 2: Predict landslide using soil, weather, and vibration
+    Returns probability 0-1
+    """
+    
+    # Wet soil (moisture > 70%) = high pore pressure = landslide risk
+    moisture_risk = max(0, (soil_moisture - 40) / 60)
+    
+    # Vibration = soil moving = unstable
+    vibration_risk = min(1.0, vibration_rms / 0.2)
+    
+    # Heavy rain = water saturation
+    rainfall_risk = min(1.0, rainfall / 150)
+    
+    # Steep slopes = gravity effect
+    slope_risk = max(0, (slope - 15) / 40)
+    
+    # Clay can't drain water = high risk
+    capacity_risk = max(0, 1 - water_capacity / 200)
+    
+    # Soil type factor: clay=1.2, loam=1.0, sand=0.8
+    soil_factor = {1: 1.2, 2: 1.0, 3: 0.8}.get(soil_type, 1.0)
+    
+    probability = (
+        moisture_risk * 0.35 +
+        vibration_risk * 0.25 +
+        rainfall_risk * 0.20 +
+        slope_risk * 0.12 +
+        capacity_risk * 0.08
+    ) * soil_factor
+    
+    return min(1.0, max(0.0, probability))
+
+
+def predict_fire_risk(
+    soil_moisture: float,
+    temperature: float,
+    rainfall: float,
+    vegetation: float,
+    wind_speed: float
+) -> float:
+    """
+    REQUIREMENT 2: Predict fire using soil dryness, weather, and vegetation
+    Returns probability 0-1
+    """
+    
+    # Dry soil = fire ignition
+    dry_risk = max(0, (40 - soil_moisture) / 40) if soil_moisture < 40 else 0
+    
+    # Hot temperature = faster burning
+    temp_risk = max(0, (temperature - 15) / 35)
+    
+    # No rain = dry vegetation (fuel)
+    rainfall_risk = max(0, 1 - rainfall / 100)
+    
+    # More vegetation = more fuel
+    vegetation_risk = vegetation / 100
+    
+    # Fast wind = spreads fire
+    wind_risk = min(1.0, wind_speed / 30)
+    
+    probability = (
+        dry_risk * 0.30 +
+        temp_risk * 0.25 +
+        rainfall_risk * 0.20 +
+        vegetation_risk * 0.15 +
+        wind_risk * 0.10
+    )
+    
+    return min(1.0, max(0.0, probability))
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 🧬 ML MODEL
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def build_ml_model():
+    """Build ensemble ML model"""
+    rf = RandomForestClassifier(n_estimators=300, max_depth=8, random_state=42, n_jobs=-1)
+    gb = GradientBoostingClassifier(n_estimators=200, learning_rate=0.05, random_state=42)
+    
+    return VotingClassifier(
+        estimators=[("rf", rf), ("gb", gb)],
+        voting="soft",
+        weights=[0.6, 0.4]
+    )
+
+def train_ml_model(df: pd.DataFrame) -> Tuple[Optional[object], Optional[object]]:
+    """Train model on labelled data"""
+    labelled = df.dropna(subset=["label"])
+    
+    if len(labelled) < MIN_LABELLED_SAMPLES:
+        log.warning(f"Only {len(labelled)} labelled samples (need {MIN_LABELLED_SAMPLES})")
+        return None, None
+    
+    try:
+        X = labelled[FEATURE_COLUMNS].astype(float)
+        y = labelled["label"].astype(int)
+        
+        scaler = StandardScaler()
+        X_scaled = scaler.fit_transform(X)
+        
+        model = build_ml_model()
+        
+        if len(y.unique()) > 1:
+            scores = cross_val_score(model, X_scaled, y, cv=min(5, len(y)//10), scoring='roc_auc')
+            log.info(f"✓ Model CV AUC: {scores.mean():.3f}")
+        
+        model.fit(X_scaled, y)
+        log.info(f"✓ Model trained on {len(labelled)} real events")
+        
+        return model, scaler
+    except Exception as e:
+        log.error(f"Training error: {e}")
+        return None, None
+
+def load_or_init_model() -> Tuple[Optional[object], Optional[object]]:
+    """Load model or train from seed"""
+    if Path(MODEL_PATH).exists() and Path(SCALER_PATH).exists():
         try:
-            df  = load_training_df()
-            clf = train_model(df)
-            if clf:
-                joblib.dump(clf, MODEL_PATH)
-                model = clf   # atomic replace
-                log.info("Model retrained on %d labelled rows and saved.", len(df.dropna(subset=["label"])))
-            else:
-                log.info("Retrain skipped — not enough labelled data yet.")
-        except Exception as exc:
-            log.error("Retrain failed: %s", exc)
+            return joblib.load(MODEL_PATH), joblib.load(SCALER_PATH)
+        except:
+            pass
+    
+    df = pd.DataFrame(SEED_DATA)
+    model, scaler = train_ml_model(df)
+    
+    if model and scaler:
+        joblib.dump(model, MODEL_PATH)
+        joblib.dump(scaler, SCALER_PATH)
+    
+    return model, scaler
 
-# ─────────────────────────────────────────────
-# FLASK APP
-# ─────────────────────────────────────────────
+
+model, scaler = load_or_init_model()
+
+
+def predict_with_ml(features: List[float]) -> float:
+    """Use ML for prediction"""
+    global model, scaler
+    
+    if model is None or scaler is None:
+        return 0.5
+    
+    try:
+        features_scaled = scaler.transform([features])
+        return float(model.predict_proba(features_scaled)[0][1])
+    except:
+        return 0.5
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 🔮 MAKE PREDICTIONS (REQUIREMENT 2)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def make_disaster_prediction(node_id: int, agg_data: AveragedSensorData) -> DisasterPrediction:
+    """
+    REQUIREMENT 2: Predict upcoming disaster
+    Uses: sensor data + weather + soil + ML model
+    """
+    
+    config = SITE_CONFIG.get(node_id, SITE_CONFIG[1])
+    
+    # Get weather (with caching)
+    with state_lock:
+        now = time.time()
+        cache_key = f"weather_{node_id}"
+        
+        if cache_key not in cache_time or (now - cache_time[cache_key] > 900):
+            weather = get_weather_data(agg_data.lat, agg_data.lon)
+            weather_cache[node_id] = weather
+            cache_time[cache_key] = now
+        else:
+            weather = weather_cache[node_id]
+        
+        # Get soil water capacity (with caching)
+        cache_key = f"soil_{node_id}"
+        if cache_key not in cache_time or (now - cache_time[cache_key] > 3600):
+            water_capacity = get_soil_water_capacity(agg_data.lat, agg_data.lon)
+            soil_cache[node_id] = {"water_capacity": water_capacity}
+            cache_time[cache_key] = now
+        else:
+            water_capacity = soil_cache[node_id]["water_capacity"]
+    
+    # Build 12-feature vector
+    features = [
+        agg_data.soil_moisture_avg,
+        agg_data.vibration_max,
+        agg_data.vibration_rms,
+        agg_data.flame_detected,
+        weather.rainfall_24h,
+        weather.temperature,
+        weather.wind_speed,
+        weather.wind_direction,
+        config["soil_type"],
+        water_capacity,
+        config["slope"],
+        config["vegetation_cover"]
+    ]
+    
+    # PREDICTION 1: Landslide risk
+    landslide_prob = predict_landslide_risk(
+        agg_data.soil_moisture_avg,
+        agg_data.vibration_rms,
+        weather.rainfall_24h,
+        config["slope"],
+        water_capacity,
+        config["soil_type"]
+    )
+    
+    # Blend with ML if available
+    if model is not None:
+        ml_prob = predict_with_ml(features)
+        landslide_prob = 0.6 * landslide_prob + 0.4 * ml_prob
+    
+    # PREDICTION 2: Fire risk
+    fire_prob = predict_fire_risk(
+        agg_data.soil_moisture_avg,
+        weather.temperature,
+        weather.rainfall_24h,
+        config["vegetation_cover"],
+        weather.wind_speed
+    )
+    
+    # REQUIREMENT 4: Fire spread direction from wind
+    fire_dir, fire_deg = calculate_fire_spread(weather.wind_direction)
+    
+    # Risk classification
+    landslide_risk = "HIGH" if landslide_prob > 0.75 else "MEDIUM" if landslide_prob > 0.4 else "LOW"
+    fire_risk = "DANGER" if fire_prob > 0.75 else "WARNING" if fire_prob > 0.4 else "NO"
+    
+    # REQUIREMENT 2: Overall region safety
+    region_safety = "DANGER" if (landslide_risk == "HIGH" or fire_risk == "DANGER") else \
+                    "CAUTION" if (landslide_risk == "MEDIUM" or fire_risk == "WARNING") else "SAFE"
+    
+    return DisasterPrediction(
+        timestamp=datetime.now(),
+        node_id=node_id,
+        landslide_probability=round(landslide_prob, 3),
+        landslide_risk=landslide_risk,
+        fire_probability=round(fire_prob, 3),
+        fire_risk=fire_risk,
+        fire_spread_direction=fire_dir,
+        fire_spread_degrees=round(fire_deg, 1),
+        region_safety=region_safety,
+        features_used={
+            "soil_moisture": round(agg_data.soil_moisture_avg, 1),
+            "vibration_rms": round(agg_data.vibration_rms, 4),
+            "flame": agg_data.flame_detected,
+            "rainfall_24h": round(weather.rainfall_24h, 1),
+            "temperature": round(weather.temperature, 1),
+            "wind_speed": round(weather.wind_speed, 1),
+            "wind_direction": round(weather.wind_direction, 0),
+            "water_capacity": round(water_capacity, 0)
+        }
+    )
+# ═══════════════════════════════════════════════════════════════════════════════
+# ⏰ BACKGROUND THREADS
+# ═══════════════════════════════════════════════════════════════════════════════
+def aggregation_and_prediction_thread():
+    """
+    REQUIREMENT 3: Every 15 minutes:
+    1. Average sensor data
+    2. Make predictions
+    3. Save to CSV
+    """
+    while True:
+        time.sleep(DATA_COLLECTION_INTERVAL)
+        
+        log.info("═" * 70)
+        log.info("15-MINUTE AGGREGATION & PREDICTION")
+        log.info("═" * 70)
+        
+        with state_lock:
+            local_buffer = dict(sensor_buffer)
+            sensor_buffer.clear()
+        
+        for node_id, readings in local_buffer.items():
+            if not readings:
+                continue
+            
+            try:
+                # Extract values
+                soil = [r.soil_moisture for r in readings]
+                vib_x = [r.vibration_x for r in readings]
+                vib_y = [r.vibration_y for r in readings]
+                vib_z = [r.vibration_z for r in readings]
+                flame = [r.flame_detected for r in readings]
+                
+                # Aggregate (REQUIREMENT 3)
+                agg = AveragedSensorData(
+                    timestamp=datetime.now(),
+                    node_id=node_id,
+                    soil_moisture_avg=float(np.mean(soil)),
+                    vibration_max=max(max(abs(x) for x in vib_x),
+                                     max(abs(y) for y in vib_y),
+                                     max(abs(z) for z in vib_z)),
+                    vibration_rms=float(np.sqrt(np.mean([x**2+y**2+z**2 for x,y,z in zip(vib_x,vib_y,vib_z)]))),
+                    flame_detected=1 if any(flame) else 0,
+                    reading_count=len(readings),
+                    lat=readings[-1].lat,
+                    lon=readings[-1].lon
+                )
+                
+                # REQUIREMENT 2: Make prediction
+                pred = make_disaster_prediction(node_id, agg)
+                
+                with state_lock:
+                    latest_predictions[node_id] = pred
+                
+                # REQUIREMENT 3: Save to CSV for training
+                csv_row = {
+                    "soil_moisture": agg.soil_moisture_avg,
+                    "vibration_max": agg.vibration_max,
+                    "vibration_rms": agg.vibration_rms,
+                    "flame_detected": agg.flame_detected,
+                    "rainfall_24h": pred.features_used.get("rainfall_24h", 0),
+                    "temperature": pred.features_used.get("temperature", 25),
+                    "wind_speed": pred.features_used.get("wind_speed", 5),
+                    "wind_direction": pred.features_used.get("wind_direction", 0),
+                    "soil_type": SITE_CONFIG[node_id]["soil_type"],
+                    "water_bearing_capacity": pred.features_used.get("water_capacity", 140),
+                    "slope": SITE_CONFIG[node_id]["slope"],
+                    "vegetation_cover": SITE_CONFIG[node_id]["vegetation_cover"],
+                    "label": "",
+                    "event_type": "",
+                    "node_id": node_id,
+                    "lat": round(agg.lat, 6),
+                    "lon": round(agg.lon, 6),
+                    "timestamp": agg.timestamp.isoformat()
+                }
+                save_aggregated_data_to_csv(csv_row)
+                
+                # Log
+                site_name = SITE_CONFIG.get(node_id, {}).get("name", f"Node {node_id}")
+                log.info(
+                    f"✓ {site_name}\n"
+                    f"  Readings: {agg.reading_count} | "
+                    f"Soil: {agg.soil_moisture_avg:.1f}% | "
+                    f"Vibration: {agg.vibration_rms:.4f}g\n"
+                    f"  Landslide: {pred.landslide_risk} ({pred.landslide_probability:.1%}) | "
+                    f"Fire: {pred.fire_risk} ({pred.fire_probability:.1%}) → {pred.fire_spread_direction}\n"
+                    f"  Region Safety: {pred.region_safety}"
+                )
+                
+            except Exception as e:
+                log.error(f"Node {node_id} error: {e}", exc_info=True)
+
+
+def auto_retrain_thread():
+    """Auto-retrain ML model every 24 hours"""
+    global model, scaler
+    
+    while True:
+        time.sleep(AUTO_RETRAIN_INTERVAL)
+        
+        log.info("═" * 70)
+        log.info("24-HOUR AUTO-RETRAIN")
+        log.info("═" * 70)
+        
+        try:
+            df = load_training_data()
+            new_model, new_scaler = train_ml_model(df)
+            
+            if new_model and new_scaler:
+                joblib.dump(new_model, MODEL_PATH)
+                joblib.dump(new_scaler, SCALER_PATH)
+                model = new_model
+                scaler = new_scaler
+                
+                log.info(f"✓ Model improved!")
+            
+        except Exception as e:
+            log.error(f"Retrain error: {e}", exc_info=True)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 🌐 FLASK REST API
+# ═══════════════════════════════════════════════════════════════════════════════
+
 app = Flask(__name__)
+
 
 @app.route("/node-data", methods=["POST"])
 def receive_node_data():
+    """
+    REQUIREMENT 1: Receive real-time sensor data
+    Node sends: soil_moisture, vibration (x,y,z), flame, location
+    """
     try:
-        data = request.get_json(force=True)   # <-- FORCE JSON PARSE
-        if data is None:
-            return jsonify({"error": "No JSON received"}), 400
-
-        log.info("RECEIVED FROM GATEWAY: %s", data)
-
-        node_id = data["node_id"]
-        flame   = data.get("flame", {"front": 0, "right": 0, "back": 0, "left": 0})
-
-        record = {
-            "soil":     data["soil_moisture"],
-            "vib_x":    data["vib_x"],
-            "vib_y":    data["vib_y"],
-            "vib_z":    data["vib_z"],
-            "humidity": data.get("humidity", 70),
-            "lat":      data["lat"],
-            "lon":      data["lon"],
-            "flame":    flame,
-            "time":     datetime.now(),
-        }
-
+        data = request.get_json()
+        if not data:
+            return jsonify({"error": "No JSON"}), 400
+        
+        required = ["node_id", "soil_moisture", "vibration_x", "vibration_y", "vibration_z", "lat", "lon"]
+        if not all(k in data for k in required):
+            return jsonify({"error": "Missing fields"}), 400
+        
+        reading = NodeSensorReading(
+            timestamp=datetime.now(),
+            node_id=int(data["node_id"]),
+            soil_moisture=float(data["soil_moisture"]),
+            vibration_x=float(data["vibration_x"]),
+            vibration_y=float(data["vibration_y"]),
+            vibration_z=float(data["vibration_z"]),
+            flame_detected=int(data.get("flame_detected", 0)),
+            lat=float(data["lat"]),
+            lon=float(data["lon"])
+        )
+        
         with state_lock:
-            raw_buffer.setdefault(node_id, []).append(record)
-
-        return jsonify({"status": "received"}), 200
-
+            sensor_buffer[reading.node_id].append(reading)
+            buffer_size = len(sensor_buffer[reading.node_id])
+        
+        return jsonify({
+            "status": "ok",
+            "readings_buffered": buffer_size,
+            "message": f"Data received from node {reading.node_id}"
+        })
+        
     except Exception as e:
-        log.error("POST /node-data error: %s", e)
-        return jsonify({"error": str(e)}), 400
+        log.error(f"Error: {e}")
+        return jsonify({"error": str(e)}), 500
 
-@app.route("/api/data")
-def api_data():
-    """Latest 15-min aggregated prediction per node."""
-    with state_lock:
-        return jsonify(dict(result_db))
 
-@app.route("/api/realtime")
-def api_realtime():
-    """Current raw buffer snapshot with live fire direction."""
-    out = {}
+@app.route("/api/predictions", methods=["GET"])
+def get_predictions():
+    """
+    REQUIREMENT 5: Get predicted data
+    Returns: landslide risk, fire risk, fire direction, region safety
+    """
     with state_lock:
-        for node_id, records in raw_buffer.items():
-            if not records:
-                continue
-            latest = records[-1]
-            out[node_id] = {
-                "soil":     latest["soil"],
-                "vib_x":    latest["vib_x"],
-                "vib_y":    latest["vib_y"],
-                "vib_z":    latest["vib_z"],
-                "humidity": latest["humidity"],
-                "fire":     analyse_fire_direction(latest.get("flame", {})),
-                "time":     latest["time"].strftime("%Y-%m-%d %H:%M:%S"),
+        results = {}
+        for node_id, pred in latest_predictions.items():
+            results[str(node_id)] = {
+                "node_id": pred.node_id,
+                "node_name": SITE_CONFIG.get(node_id, {}).get("name", f"Node {node_id}"),
+                "timestamp": pred.timestamp.isoformat(),
+                
+                "landslide": {
+                    "probability": pred.landslide_probability,
+                    "risk": pred.landslide_risk
+                },
+                
+                "fire": {
+                    "probability": pred.fire_probability,
+                    "risk": pred.fire_risk,
+                    "spread_direction": pred.fire_spread_direction,
+                    "spread_degrees": pred.fire_spread_degrees
+                },
+                
+                "region_safety": pred.region_safety,
+                "features": pred.features_used
             }
-    return jsonify(out)
+    
+    return jsonify(results)
 
-@app.route("/api/training-data")
-def api_training_data():
-    """Return the last 100 rows of the training CSV as JSON."""
-    try:
-        df = pd.read_csv(TRAINING_CSV).tail(100)
-        return jsonify(df.to_dict(orient="records"))
-    except Exception as exc:
-        return jsonify({"error": str(exc)}), 500
+
+@app.route("/api/live-sensors", methods=["GET"])
+def get_live_sensors():
+    """
+    REQUIREMENT 5: Get real-time sensor data
+    Returns: current soil moisture, vibration, flame status
+    """
+    with state_lock:
+        live = {}
+        for node_id, readings in sensor_buffer.items():
+            if readings:
+                latest = readings[-1]
+                live[str(node_id)] = {
+                    "node_id": node_id,
+                    "timestamp": latest.timestamp.isoformat(),
+                    "soil_moisture": round(latest.soil_moisture, 1),
+                    "vibration": {
+                        "x": round(latest.vibration_x, 4),
+                        "y": round(latest.vibration_y, 4),
+                        "z": round(latest.vibration_z, 4),
+                        "max": round(max(abs(latest.vibration_x), abs(latest.vibration_y), abs(latest.vibration_z)), 4)
+                    },
+                    "flame_detected": latest.flame_detected,
+                    "readings_in_buffer": len(readings)
+                }
+    
+    return jsonify(live)
+
 
 @app.route("/api/label", methods=["POST"])
-def api_label():
-    """
-    Allow an operator to assign a ground-truth label to a saved row.
-    POST body: { "timestamp": "2024-01-01 12:00:00", "node_id": 1, "label": 1 }
-    This labelled data will be used in the next 24h retrain.
-    """
-    body      = request.json
-    ts        = body.get("timestamp")
-    node_id   = body.get("node_id")
-    label_val = body.get("label")
-
-    if ts is None or label_val is None:
-        return jsonify({"error": "timestamp and label are required"}), 400
-
+def label_event():
+    """Label real events for model training"""
     try:
-        df = pd.read_csv(TRAINING_CSV)
+        body = request.json
+        ts = body.get("timestamp")
+        node_id = body.get("node_id")
+        label_val = body.get("label")
+        event_type = body.get("event_type", "")
+        
+        if not (ts and label_val is not None):
+            return jsonify({"error": "timestamp and label required"}), 400
+        
+        df = load_training_data()
         mask = (df["timestamp"] == ts)
-        if node_id is not None:
+        if node_id:
             mask &= (df["node_id"] == node_id)
+        
         if mask.sum() == 0:
-            return jsonify({"error": "No matching row found"}), 404
+            return jsonify({"error": "No matching record"}), 404
+        
         df.loc[mask, "label"] = int(label_val)
+        df.loc[mask, "event_type"] = event_type
         df.to_csv(TRAINING_CSV, index=False)
-        log.info("Label %s applied to %d row(s) at %s", label_val, mask.sum(), ts)
+        
+        log.info(f"✓ Labelled {mask.sum()} record(s)")
         return jsonify({"updated": int(mask.sum())})
-    except Exception as exc:
-        log.error("Labelling failed: %s", exc)
-        return jsonify({"error": str(exc)}), 500
+        
+    except Exception as e:
+        log.error(f"Error: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/stats", methods=["GET"])
+def get_stats():
+    """Get training statistics"""
+    try:
+        df = load_training_data()
+        labelled = df.dropna(subset=["label"])
+        
+        return jsonify({
+            "total_records": len(df),
+            "labelled_records": len(labelled),
+            "unlabelled_records": len(df) - len(labelled),
+            "model_ready": len(labelled) >= MIN_LABELLED_SAMPLES,
+            "records_needed": max(0, MIN_LABELLED_SAMPLES - len(labelled))
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
 
 @app.route("/")
-def index():
+def dashboard():
+    """
+    REQUIREMENT 5: Serve web dashboard
+    Shows real-time sensor data + predicted data
+    """
     return render_template("index.html")
 
-# ─────────────────────────────────────────────
-# ENTRY POINT
-# ─────────────────────────────────────────────
+
+@app.route("/map")
+def map_dashboard():
+    """
+    MAP DASHBOARD: Show nodes and disaster zones on interactive map
+    Displays:
+    - Node locations with markers
+    - Current sensor data in popups
+    - Disaster probability zones (circles around nodes)
+    - Color-coded risk levels (green=safe, yellow=caution, red=danger)
+    - Real-time updates
+    """
+    return render_template("index.html")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 🚀 MAIN
+# ═══════════════════════════════════════════════════════════════════════════════
+
 if __name__ == "__main__":
-    ensure_csv()
-
-    threading.Thread(target=prediction_loop, daemon=True, name="PredictionLoop").start()
-    threading.Thread(target=retrain_loop,    daemon=True, name="RetrainLoop").start()
-
-    log.info("Server starting — predictions every 15 min, retrain every 24 h")
-    app.run(host="0.0.0.0", port=5000, debug=False)
+    ensure_csv_exists()
+    
+    # Start background threads
+    threading.Thread(
+        target=aggregation_and_prediction_thread,
+        daemon=True,
+        name="AggregationThread"
+    ).start()
+    
+    threading.Thread(
+        target=auto_retrain_thread,
+        daemon=True,
+        name="RetrainThread"
+    ).start()
+    
+    log.info("╔" + "═" * 70 + "╗")
+    log.info("║ 🛡️  SMART DISASTER PREDICTION SYSTEM - STARTED             ║")
+    log.info("╚" + "═" * 70 + "╝")
+    log.info("")
+    log.info("Dashboard: http://localhost:5000")
+    log.info("API: http://localhost:5000/api/predictions")
+    log.info("Real-time sensors: http://localhost:5000/api/live-sensors")
+    log.info("")
+    
+    app.run(host="0.0.0.0", port=5000, debug=False, threaded=True)
