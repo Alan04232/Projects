@@ -28,7 +28,6 @@ EXACT REQUIREMENTS IMPLEMENTATION:
    ✓ Real-time sensor data (live)
    ✓ Predicted data (every 15 min)
 """
-
 import os
 import csv
 import json
@@ -69,7 +68,7 @@ AUTO_RETRAIN_INTERVAL = 24 * 60 * 60    # Retrain ML model every 24 hours
 MIN_LABELLED_SAMPLES = 20               # Need 20+ real events to retrain
 
 # FREE APIs
-WEATHER_API_KEY = os.getenv("WEATHER_API_KEY", "")
+WEATHER_API_KEY = os.getenv("736f3bd2a4254863a9a173214261003", "")
 WEATHER_API_URL = "https://api.weatherapi.com/v1/current.json"
 SOILGRIDS_API_URL = "https://rest.isric.org/soilgrids/v2.0/properties/query"
 
@@ -138,8 +137,6 @@ class AveragedSensorData:
     reading_count: int
     lat: float
     lon: float
-
-
 @dataclass
 class WeatherInfo:
     """
@@ -150,8 +147,6 @@ class WeatherInfo:
     rainfall_24h: float             # mm
     wind_speed: float               # km/h
     wind_direction: float           # degrees (0-360)
-
-
 @dataclass
 class DisasterPrediction:
     """
@@ -214,7 +209,6 @@ SITE_CONFIG = {
         "lon": 73.86
     }
 }
-
 # ═══════════════════════════════════════════════════════════════════════════════
 # 🔒 THREAD-SAFE STATE
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -253,14 +247,11 @@ SEED_DATA = {
     "vegetation_cover": [60, 60, 60, 55, 50, 30, 60, 25, 55, 20, 55, 15],
     "label": [0, 0, 0, 0, 1, 1, 0, 1, 0, 1, 0, 1],
 }
-
-
 def ensure_csv_exists():
     """Create training CSV with seed data"""
     csv_path = Path(TRAINING_CSV)
     if csv_path.exists() and csv_path.stat().st_size > 0:
         return
-    
     df = pd.DataFrame(SEED_DATA)
     df["event_type"] = ""
     df["node_id"] = 1
@@ -548,20 +539,15 @@ def predict_with_ml(features: List[float]) -> float:
         return float(model.predict_proba(features_scaled)[0][1])
     except:
         return 0.5
-
-
 # ═══════════════════════════════════════════════════════════════════════════════
 # 🔮 MAKE PREDICTIONS (REQUIREMENT 2)
 # ═══════════════════════════════════════════════════════════════════════════════
-
 def make_disaster_prediction(node_id: int, agg_data: AveragedSensorData) -> DisasterPrediction:
     """
     REQUIREMENT 2: Predict upcoming disaster
     Uses: sensor data + weather + soil + ML model
     """
-    
     config = SITE_CONFIG.get(node_id, SITE_CONFIG[1])
-    
     # Get weather (with caching)
     with state_lock:
         now = time.time()
@@ -573,7 +559,6 @@ def make_disaster_prediction(node_id: int, agg_data: AveragedSensorData) -> Disa
             cache_time[cache_key] = now
         else:
             weather = weather_cache[node_id]
-        
         # Get soil water capacity (with caching)
         cache_key = f"soil_{node_id}"
         if cache_key not in cache_time or (now - cache_time[cache_key] > 3600):
@@ -978,14 +963,34 @@ if __name__ == "__main__":
         daemon=True,
         name="RetrainThread"
     ).start()
-    
-    log.info("╔" + "═" * 70 + "╗")
-    log.info("║ 🛡️  SMART DISASTER PREDICTION SYSTEM - STARTED             ║")
-    log.info("╚" + "═" * 70 + "╝")
-    log.info("")
-    log.info("Dashboard: http://localhost:5000")
-    log.info("API: http://localhost:5000/api/predictions")
-    log.info("Real-time sensors: http://localhost:5000/api/live-sensors")
-    log.info("")
-    
     app.run(host="0.0.0.0", port=5000, debug=False, threaded=True)
+
+PUSHBULLET_TOKEN = "o.EcCygRqab4OWN8PI7giszSXJRYhDfAQg"
+def send_sms(phone_number, message):
+    url = "https://api.pushbullet.com/v2/texts"
+    headers = {
+        "Access-Token": PUSHBULLET_TOKEN,
+        "Content-Type": "application/json"
+    }
+    data = {
+        "data": {
+            "addresses": [phone_number],
+            "message": message,
+            "target_device_iden": None
+        }
+    }
+    response = requests.post(url, json=data, headers=headers)
+    print(response.text)
+prediction = model.predict([[soil_moisture, vibration_x, vibration_y, vibration_z, flame_detected]])[0]
+
+if prediction == 2:
+    message = f"""
+🚨 RescueNet Alert
+Node: {node_id}
+Status: DANGER
+Soil Moisture: {soil_moisture}
+Vibration: {vibration_x}, {vibration_y}, {vibration_z}
+Flame: {flame_detected}
+Check system immediately.
+"""
+    send_sms("+916282842266", message)
