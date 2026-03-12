@@ -353,6 +353,24 @@
             margin-bottom: 0;
         }
 
+        /* ERROR MESSAGE */
+        .error-message {
+            background: #ffebee;
+            color: #c62828;
+            padding: 12px;
+            border-radius: 4px;
+            margin-bottom: 10px;
+            font-size: 0.85em;
+            border-left: 4px solid #c62828;
+        }
+
+        /* LOADING INDICATOR */
+        .loading {
+            text-align: center;
+            padding: 20px;
+            color: #999;
+        }
+
         /* MOBILE RESPONSIVE */
         @media (max-width: 1024px) {
             .container {
@@ -425,6 +443,9 @@
                     </div>
                 </div>
 
+                <!-- ERROR MESSAGE -->
+                <div id="error-container"></div>
+
                 <!-- NODES LIST -->
                 <div class="nodes-section">
                     <h3>📍 Monitoring Stations</h3>
@@ -474,6 +495,9 @@
         const API_BASE = "http://localhost:5000";
         const REFRESH_INTERVAL = 5000;  // 5 seconds
 
+        let dataUpdateCount = 0;
+        let lastErrorTime = 0;
+
         // ═══════════════════════════════════════════════════════════════
         // MAP INITIALIZATION
         // ═══════════════════════════════════════════════════════════════
@@ -500,15 +524,39 @@
         }
 
         // ═══════════════════════════════════════════════════════════════
+        // ERROR HANDLING
+        // ═══════════════════════════════════════════════════════════════
+
+        function showError(message) {
+            const container = document.getElementById('error-container');
+            
+            // Don't spam errors - show max once per 10 seconds
+            const now = Date.now();
+            if (now - lastErrorTime < 10000) return;
+            lastErrorTime = now;
+
+            container.innerHTML = `<div class="error-message">⚠️ ${message}</div>`;
+            
+            // Clear after 5 seconds
+            setTimeout(() => {
+                container.innerHTML = '';
+            }, 5000);
+        }
+
+        // ═══════════════════════════════════════════════════════════════
         // DATA FETCHING
         // ═══════════════════════════════════════════════════════════════
 
         async function fetchPredictions() {
             try {
                 const resp = await fetch(`${API_BASE}/api/predictions`);
-                return await resp.json();
+                if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+                const data = await resp.json();
+                console.log("✓ Predictions fetched:", Object.keys(data).length, "nodes");
+                return data;
             } catch (e) {
                 console.error("Error fetching predictions:", e);
+                showError(`Cannot fetch predictions: ${e.message}`);
                 return {};
             }
         }
@@ -516,9 +564,13 @@
         async function fetchLiveSensors() {
             try {
                 const resp = await fetch(`${API_BASE}/api/live-sensors`);
-                return await resp.json();
+                if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+                const data = await resp.json();
+                console.log("✓ Live sensors fetched:", Object.keys(data).length, "nodes");
+                return data;
             } catch (e) {
                 console.error("Error fetching sensors:", e);
+                showError(`Cannot fetch sensors: ${e.message}`);
                 return {};
             }
         }
@@ -532,6 +584,13 @@
                 fetchPredictions(),
                 fetchLiveSensors()
             ]);
+
+            dataUpdateCount++;
+            console.log(`\n[Update #${dataUpdateCount}] Predictions: ${Object.keys(predictions).length}, Sensors: ${Object.keys(sensors).length}`);
+
+            if (Object.keys(predictions).length === 0 && Object.keys(sensors).length === 0) {
+                showError("No data from server. Is the Flask app running? Check http://localhost:5000");
+            }
 
             updateMap(predictions, sensors);
             updateSidebar(predictions, sensors);
@@ -547,10 +606,16 @@
 
             for (const [nodeId, pred] of Object.entries(predictions)) {
                 const sensor = sensors[nodeId];
-                if (!sensor) continue;
+                if (!sensor) {
+                    console.warn(`Prediction for node ${nodeId} but no sensor data`);
+                    continue;
+                }
 
-                const lat = sensor.latitude || 10.02 + (Math.random() * 0.5);
-                const lon = sensor.longitude || 76.30 + (Math.random() * 0.5);
+                // ✅ FIX: Use correct location fields (lat/lon, not latitude/longitude)
+                const lat = sensor.lat !== undefined ? sensor.lat : (10.02 + Math.random() * 0.5);
+                const lon = sensor.lon !== undefined ? sensor.lon : (76.30 + Math.random() * 0.5);
+
+                console.log(`Node ${nodeId}: lat=${lat}, lon=${lon}`);
 
                 // Determine risk level and color
                 const riskLevel = pred.region_safety.toLowerCase();
@@ -614,11 +679,11 @@
                 }
 
                 // Create or update disaster zone (circle showing affected area)
-                const radiusKm = 5 + (maxProbability * 10);  // Larger radius = higher probability
+                const radiusKm = 5 + (maxProbability * 10);
 
                 if (disasterZones[nodeId]) {
                     disasterZones[nodeId].setLatLng([lat, lon]);
-                    disasterZones[nodeId].setRadius(radiusKm * 111);  // Convert km to meters approximately
+                    disasterZones[nodeId].setRadius(radiusKm * 111);
                     disasterZones[nodeId].setStyle({
                         fillColor: riskColor,
                         color: riskColor
@@ -667,6 +732,7 @@
 
             for (const [nodeId, pred] of Object.entries(predictions)) {
                 const sensor = sensors[nodeId];
+                if (!sensor) continue;
 
                 // Count by safety
                 if (pred.region_safety === 'SAFE') safeCount++;
@@ -688,11 +754,11 @@
                     <div class="node-info">
                         <div class="node-info-item">
                             <span class="node-info-label">Soil:</span>
-                            <span class="node-info-value">${sensor ? sensor.soil_moisture + '%' : '--'}</span>
+                            <span class="node-info-value">${sensor.soil_moisture}%</span>
                         </div>
                         <div class="node-info-item">
                             <span class="node-info-label">Vibration:</span>
-                            <span class="node-info-value">${sensor ? sensor.vibration.max.toFixed(3) + 'g' : '--'}</span>
+                            <span class="node-info-value">${sensor.vibration.max.toFixed(3)}g</span>
                         </div>
                     </div>
                     <div class="risk-section" style="margin-top: 10px; margin-left: -15px; margin-right: -15px; margin-bottom: -12px; padding: 12px 15px;">
@@ -753,6 +819,10 @@
         // ═══════════════════════════════════════════════════════════════
 
         function zoomToAll() {
+            if (Object.keys(nodeMarkers).length === 0) {
+                alert("No nodes to zoom to. Waiting for data...");
+                return;
+            }
             const group = new L.featureGroup(Object.values(nodeMarkers));
             map.fitBounds(group.getBounds().pad(0.1));
         }
@@ -770,7 +840,11 @@
         // INITIALIZATION
         // ═══════════════════════════════════════════════════════════════
 
-        document.addEventListener('DOMContentLoaded', initMap);
+        document.addEventListener('DOMContentLoaded', () => {
+            console.log("🚀 Dashboard initializing...");
+            console.log("API Base:", API_BASE);
+            initMap();
+        });
     </script>
 </body>
 </html>

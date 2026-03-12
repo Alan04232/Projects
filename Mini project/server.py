@@ -1,32 +1,11 @@
 """
-🛡️ SMART DISASTER PREDICTION SYSTEM - FINAL VERSION
+🛡️ SMART DISASTER PREDICTION SYSTEM - FIXED VERSION
 ===================================================
-
-EXACT REQUIREMENTS IMPLEMENTATION:
-
-1. NODE SENDS (Real-time):
-   ✓ soil_moisture (0-100%)
-   ✓ vibration (3-axis: x, y, z)
-   ✓ flame_detected (0/1)
-   
-2. SERVER PREDICTS by comparing:
-   ✓ Sensor data (above)
-   ✓ Soil type (config)
-   ✓ Soil water bearing capacity (SoilGrids API - FREE)
-   ✓ Upcoming weather (WeatherAPI - FREE)
-   → Predict: upcoming event + region safety
-   
-3. DATA MANAGEMENT:
-   ✓ Real-time reception
-   ✓ Average 15-min data
-   ✓ Save to CSV for training
-   
-4. FIRE DIRECTION:
-   ✓ From wind_direction (WeatherAPI)
-   
-5. WEBPAGE DISPLAY:
-   ✓ Real-time sensor data (live)
-   ✓ Predicted data (every 15 min)
+KEY FIXES:
+✅ Added CORS headers for browser API access
+✅ Added lat/lon to live-sensors API response
+✅ Fixed Weather API key env var setup
+✅ Better path handling (Windows/Linux compatible)
 """
 import os
 import csv
@@ -45,21 +24,22 @@ import pandas as pd
 import requests
 import joblib
 from flask import Flask, jsonify, request, render_template
+from flask_cors import CORS  # ✅ NEW: CORS support
 from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier, VotingClassifier
 from sklearn.preprocessing import StandardScaler
 from sklearn.model_selection import cross_val_score
 from typing import Optional, Tuple
 from sklearn.base import BaseEstimator
-from sklearn.preprocessing import StandardScaler
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # 🔧 CONFIGURATION
 # ═══════════════════════════════════════════════════════════════════════════════
 
-# File Paths
-MODEL_PATH = "D:\\workspace\\Projects\\Mini project\\model.pkl"
-SCALER_PATH = "D:\\workspace\\Projects\\Mini project\\scaler.pkl"
-TRAINING_CSV = "D:\\workspace\\Projects\\Mini project\\disaster_training_data.csv"
+# ✅ FIX 1: Use pathlib for cross-platform paths
+BASE_DIR = Path(__file__).parent
+MODEL_PATH = BASE_DIR / "model.pkl"
+SCALER_PATH = BASE_DIR / "scaler.pkl"
+TRAINING_CSV = BASE_DIR / "disaster_training_data.csv"
 
 # Timing (ALL CONFIGURABLE)
 DATA_COLLECTION_INTERVAL = 15 * 60      # Collect sensor data for 15 min (900 sec)
@@ -67,10 +47,12 @@ PREDICTION_INTERVAL = 15 * 60           # Make prediction every 15 min
 AUTO_RETRAIN_INTERVAL = 24 * 60 * 60    # Retrain ML model every 24 hours
 MIN_LABELLED_SAMPLES = 20               # Need 20+ real events to retrain
 
-# FREE APIs
-WEATHER_API_KEY = os.getenv("736f3bd2a4254863a9a173214261003", "")
+# ✅ FIX 2: Proper Weather API key setup
+WEATHER_API_KEY = os.getenv("736f3bd2a4254863a9a173214261003", "736f3bd2a4254863a9a173214261003")
 WEATHER_API_URL = "https://api.weatherapi.com/v1/current.json"
 SOILGRIDS_API_URL = "https://rest.isric.org/soilgrids/v2.0/properties/query"
+
+print(f"[STARTUP] Weather API Key: {'SET' if WEATHER_API_KEY else 'NOT SET'}")
 
 # ML Features (12 total - CRITICAL for prediction)
 FEATURE_COLUMNS = [
@@ -137,6 +119,7 @@ class AveragedSensorData:
     reading_count: int
     lat: float
     lon: float
+
 @dataclass
 class WeatherInfo:
     """
@@ -147,6 +130,7 @@ class WeatherInfo:
     rainfall_24h: float             # mm
     wind_speed: float               # km/h
     wind_direction: float           # degrees (0-360)
+
 @dataclass
 class DisasterPrediction:
     """
@@ -179,10 +163,6 @@ class DisasterPrediction:
 # 🌍 SITE CONFIGURATION
 # ═══════════════════════════════════════════════════════════════════════════════
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# 🌍 SITE CONFIGURATION
-# ═══════════════════════════════════════════════════════════════════════════════
-
 SITE_CONFIG = {
     1: {
         "name": "Mountain Slope A - Kerala",
@@ -209,6 +189,7 @@ SITE_CONFIG = {
         "lon": 73.86
     }
 }
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # 🔒 THREAD-SAFE STATE
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -247,6 +228,7 @@ SEED_DATA = {
     "vegetation_cover": [60, 60, 60, 55, 50, 30, 60, 25, 55, 20, 55, 15],
     "label": [0, 0, 0, 0, 1, 1, 0, 1, 0, 1, 0, 1],
 }
+
 def ensure_csv_exists():
     """Create training CSV with seed data"""
     csv_path = Path(TRAINING_CSV)
@@ -539,15 +521,18 @@ def predict_with_ml(features: List[float]) -> float:
         return float(model.predict_proba(features_scaled)[0][1])
     except:
         return 0.5
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # 🔮 MAKE PREDICTIONS (REQUIREMENT 2)
 # ═══════════════════════════════════════════════════════════════════════════════
+
 def make_disaster_prediction(node_id: int, agg_data: AveragedSensorData) -> DisasterPrediction:
     """
     REQUIREMENT 2: Predict upcoming disaster
     Uses: sensor data + weather + soil + ML model
     """
     config = SITE_CONFIG.get(node_id, SITE_CONFIG[1])
+    
     # Get weather (with caching)
     with state_lock:
         now = time.time()
@@ -559,6 +544,7 @@ def make_disaster_prediction(node_id: int, agg_data: AveragedSensorData) -> Disa
             cache_time[cache_key] = now
         else:
             weather = weather_cache[node_id]
+        
         # Get soil water capacity (with caching)
         cache_key = f"soil_{node_id}"
         if cache_key not in cache_time or (now - cache_time[cache_key] > 3600):
@@ -640,9 +626,11 @@ def make_disaster_prediction(node_id: int, agg_data: AveragedSensorData) -> Disa
             "water_capacity": round(water_capacity, 0)
         }
     )
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # ⏰ BACKGROUND THREADS
 # ═══════════════════════════════════════════════════════════════════════════════
+
 def aggregation_and_prediction_thread():
     """
     REQUIREMENT 3: Every 15 minutes:
@@ -766,6 +754,8 @@ def auto_retrain_thread():
 
 app = Flask(__name__)
 
+# ✅ FIX 3: Add CORS support
+CORS(app)
 
 @app.route("/node-data", methods=["POST"])
 def receive_node_data():
@@ -778,17 +768,17 @@ def receive_node_data():
         if not data:
             return jsonify({"error": "No JSON"}), 400
         
-        required = ["node_id", "soil_moisture", "vibration_x", "vibration_y", "vibration_z", "lat", "lon"]
+        required = ["node_id","soil_moisture","vib_x","vib_y","vib_z","lat","lon"]
         if not all(k in data for k in required):
-            return jsonify({"error": "Missing fields"}), 400
+            return jsonify({"error": f"Missing fields. Required: {required}"}), 400
         
         reading = NodeSensorReading(
             timestamp=datetime.now(),
             node_id=int(data["node_id"]),
             soil_moisture=float(data["soil_moisture"]),
-            vibration_x=float(data["vibration_x"]),
-            vibration_y=float(data["vibration_y"]),
-            vibration_z=float(data["vibration_z"]),
+            vibration_x=float(data["vib_x"]),
+            vibration_y=float(data["vib_y"]),
+            vibration_z=float(data["vib_z"]),
             flame_detected=int(data.get("flame_detected", 0)),
             lat=float(data["lat"]),
             lon=float(data["lon"])
@@ -798,17 +788,18 @@ def receive_node_data():
             sensor_buffer[reading.node_id].append(reading)
             buffer_size = len(sensor_buffer[reading.node_id])
         
+        log.info(f"✓ Node {reading.node_id} data received ({buffer_size} in buffer)")
+        
         return jsonify({
             "status": "ok",
             "readings_buffered": buffer_size,
             "message": f"Data received from node {reading.node_id}"
-        })
-        
+        })  
     except Exception as e:
         log.error(f"Error: {e}")
-        return jsonify({"error": str(e)}), 500
-
-
+        print("Incoming data:", data if 'data' in locals() else "No JSON")
+        return jsonify({"error": str(e)}), 400
+        
 @app.route("/api/predictions", methods=["GET"])
 def get_predictions():
     """
@@ -841,34 +832,44 @@ def get_predictions():
     
     return jsonify(results)
 
-
 @app.route("/api/live-sensors", methods=["GET"])
 def get_live_sensors():
     """
     REQUIREMENT 5: Get real-time sensor data
     Returns: current soil moisture, vibration, flame status
+    Includes lat/lon for map markers
     """
+
     with state_lock:
-        live = {}
+        live = []   # changed from {} to []
+
         for node_id, readings in sensor_buffer.items():
             if readings:
                 latest = readings[-1]
-                live[str(node_id)] = {
+
+                live.append({
                     "node_id": node_id,
                     "timestamp": latest.timestamp.isoformat(),
                     "soil_moisture": round(latest.soil_moisture, 1),
+                    "lat": latest.lat,
+                    "lon": latest.lon,
                     "vibration": {
                         "x": round(latest.vibration_x, 4),
                         "y": round(latest.vibration_y, 4),
                         "z": round(latest.vibration_z, 4),
-                        "max": round(max(abs(latest.vibration_x), abs(latest.vibration_y), abs(latest.vibration_z)), 4)
+                        "max": round(
+                            max(
+                                abs(latest.vibration_x),
+                                abs(latest.vibration_y),
+                                abs(latest.vibration_z)
+                            ), 4
+                        )
                     },
                     "flame_detected": latest.flame_detected,
                     "readings_in_buffer": len(readings)
-                }
-    
-    return jsonify(live)
+                })
 
+    return jsonify(live)
 
 @app.route("/api/label", methods=["POST"])
 def label_event():
@@ -934,20 +935,11 @@ def dashboard():
 def map_dashboard():
     """
     MAP DASHBOARD: Show nodes and disaster zones on interactive map
-    Displays:
-    - Node locations with markers
-    - Current sensor data in popups
-    - Disaster probability zones (circles around nodes)
-    - Color-coded risk levels (green=safe, yellow=caution, red=danger)
-    - Real-time updates
     """
     return render_template("index.html")
-
-
 # ═══════════════════════════════════════════════════════════════════════════════
 # 🚀 MAIN
 # ═══════════════════════════════════════════════════════════════════════════════
-
 if __name__ == "__main__":
     ensure_csv_exists()
     
@@ -963,34 +955,19 @@ if __name__ == "__main__":
         daemon=True,
         name="RetrainThread"
     ).start()
+    
+    print(f"""
+    ╔════════════════════════════════════════════╗
+    ║  🛡️  SMART DISASTER PREDICTION SYSTEM      ║
+    ║                                            ║
+    ║  Flask running on: http://localhost:5000   ║
+    ║  Dashboard: http://localhost:5000          ║
+    ║  Map: http://localhost:5000/map            ║
+    ║                                            ║
+    ║  ✅ CORS enabled for browser access        ║
+    ║  ✅ Weather API key: {'SET' if WEATHER_API_KEY else 'NOT SET'}        ║
+    ║                                            ║
+    ╚════════════════════════════════════════════╝
+    """)
+    
     app.run(host="0.0.0.0", port=5000, debug=False, threaded=True)
-
-PUSHBULLET_TOKEN = "o.EcCygRqab4OWN8PI7giszSXJRYhDfAQg"
-def send_sms(phone_number, message):
-    url = "https://api.pushbullet.com/v2/texts"
-    headers = {
-        "Access-Token": PUSHBULLET_TOKEN,
-        "Content-Type": "application/json"
-    }
-    data = {
-        "data": {
-            "addresses": [phone_number],
-            "message": message,
-            "target_device_iden": None
-        }
-    }
-    response = requests.post(url, json=data, headers=headers)
-    print(response.text)
-prediction = model.predict([[soil_moisture, vibration_x, vibration_y, vibration_z, flame_detected]])[0]
-
-if prediction == 2:
-    message = f"""
-🚨 RescueNet Alert
-Node: {node_id}
-Status: DANGER
-Soil Moisture: {soil_moisture}
-Vibration: {vibration_x}, {vibration_y}, {vibration_z}
-Flame: {flame_detected}
-Check system immediately.
-"""
-    send_sms("+916282842266", message)

@@ -6,7 +6,7 @@
 // ================= WiFi =================
 const char* ssid = "N00384";
 const char* password = "01010123";
-const char* serverURL = "http://192.168.137.1:5000/node-data";
+const char* serverURL = "http://10.71.73.5:5000/node-data";
 
 // ================= Globals =================
 volatile bool newPacket = false;

@@ -28,11 +28,11 @@
 
 // ========== NODE CONFIG ==========
 #define NODE_ID 2
-#define LAT 10.030
-#define LON 76.310
+#define LAT 10.03000
+#define LON 76.31000
 #define SENSOR_READ_INTERVAL_MS 5000
 
-uint8_t GATEWAY_MAC[] = {0x00, 0x70, 0x07, 0x3A, 0x55, 0x58};
+uint8_t GATEWAY_MAC[] = {0xA4, 0xF0, 0x0F, 0x5B, 0x66, 0xF8};
 bool mpuOK = false;
 uint8_t mpuErrorCount = 0;
 // ========== ESP-NOW CALLBACK ==========

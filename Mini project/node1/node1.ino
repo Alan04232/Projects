@@ -28,11 +28,11 @@
 
 // ========== NODE CONFIG ==========
 #define NODE_ID 1
-#define LAT 10.020
-#define LON 76.300
+#define LAT 10.02000
+#define LON 76.30000
 #define SENSOR_READ_INTERVAL_MS 5000
 
-uint8_t GATEWAY_MAC[] = {0x00, 0x70, 0x07, 0x3A, 0x55, 0x58};
+uint8_t GATEWAY_MAC[] = {0xA4, 0xF0, 0x0F, 0x5B, 0x66, 0xF8};
 
 bool mpuOK = false;
 uint8_t mpuErrorCount = 0;
@@ -154,7 +154,6 @@ void loop() {
 
   // ===== JSON PAYLOAD =====
   char payload[240];
-
   snprintf(payload, sizeof(payload),
   "{\"node_id\":%d,"
   "\"lat\":%.5f,"
@@ -163,8 +162,8 @@ void loop() {
   "\"vib_x\":%.3f,"
   "\"vib_y\":%.3f,"
   "\"vib_z\":%.3f,"
-  "\"humidity\":%.1f,"
-  "\"distance\":%.1f,"
+  "\"temperature\":%.1f,"
+  "\"flame_adc\":%.1f,"
   "\"flame\":%s}",
   NODE_ID,
   LAT,
