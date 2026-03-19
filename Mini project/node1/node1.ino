@@ -32,7 +32,7 @@
 #define LON 76.30000
 #define SENSOR_READ_INTERVAL_MS 5000
 
-uint8_t GATEWAY_MAC[] = {0xA4, 0xF0, 0x0F, 0x5B, 0x66, 0xF8};
+uint8_t GATEWAY_MAC[] = {0x00, 0x4B, 0x12, 0x3D, 0x28, 0x24};
 
 bool mpuOK = false;
 uint8_t mpuErrorCount = 0;

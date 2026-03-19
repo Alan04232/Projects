@@ -757,6 +757,41 @@ app = Flask(__name__)
 # ✅ FIX 3: Add CORS support
 CORS(app)
 
+def _predict_for_node(node_id: int):
+    """Run prediction immediately for the given node using its latest reading."""
+    with state_lock:
+        readings = sensor_buffer.get(node_id, [])
+        if not readings:
+            return None
+        latest = readings[-1]
+
+    # Use last reading as the aggregated sample (real-time)
+    agg = AveragedSensorData(
+        timestamp=latest.timestamp,
+        node_id=node_id,
+        soil_moisture_avg=latest.soil_moisture,
+        vibration_max=max(
+            abs(latest.vibration_x),
+            abs(latest.vibration_y),
+            abs(latest.vibration_z)
+        ),
+        vibration_rms=float(
+            (latest.vibration_x ** 2 + latest.vibration_y ** 2 + latest.vibration_z ** 2) ** 0.5
+        ),
+        flame_detected=latest.flame_detected,
+        reading_count=1,
+        lat=latest.lat,
+        lon=latest.lon
+    )
+
+    pred = make_disaster_prediction(node_id, agg)
+
+    with state_lock:
+        latest_predictions[node_id] = pred
+
+    return pred
+
+
 @app.route("/node-data", methods=["POST"])
 def receive_node_data():
     """
@@ -767,11 +802,11 @@ def receive_node_data():
         data = request.get_json()
         if not data:
             return jsonify({"error": "No JSON"}), 400
-        
+
         required = ["node_id","soil_moisture","vib_x","vib_y","vib_z","lat","lon"]
         if not all(k in data for k in required):
             return jsonify({"error": f"Missing fields. Required: {required}"}), 400
-        
+
         reading = NodeSensorReading(
             timestamp=datetime.now(),
             node_id=int(data["node_id"]),
@@ -783,18 +818,29 @@ def receive_node_data():
             lat=float(data["lat"]),
             lon=float(data["lon"])
         )
-        
+
         with state_lock:
             sensor_buffer[reading.node_id].append(reading)
             buffer_size = len(sensor_buffer[reading.node_id])
-        
+
+            # Count how many nodes have at least one reading
+            active_nodes = [nid for nid, reads in sensor_buffer.items() if reads]
+
+        # Immediately compute prediction for the node that sent data
+        _predict_for_node(reading.node_id)
+
+        # If we have data from at least 2 nodes, refresh predictions for all active nodes
+        if len(active_nodes) >= 2:
+            for nid in active_nodes:
+                _predict_for_node(nid)
+
         log.info(f"✓ Node {reading.node_id} data received ({buffer_size} in buffer)")
-        
+
         return jsonify({
             "status": "ok",
             "readings_buffered": buffer_size,
             "message": f"Data received from node {reading.node_id}"
-        })  
+        })
     except Exception as e:
         log.error(f"Error: {e}")
         print("Incoming data:", data if 'data' in locals() else "No JSON")
@@ -841,13 +887,13 @@ def get_live_sensors():
     """
 
     with state_lock:
-        live = []   # changed from {} to []
+        live = {}   # Dictionary keyed by node_id
 
         for node_id, readings in sensor_buffer.items():
             if readings:
                 latest = readings[-1]
 
-                live.append({
+                live[str(node_id)] = {
                     "node_id": node_id,
                     "timestamp": latest.timestamp.isoformat(),
                     "soil_moisture": round(latest.soil_moisture, 1),
@@ -867,7 +913,7 @@ def get_live_sensors():
                     },
                     "flame_detected": latest.flame_detected,
                     "readings_in_buffer": len(readings)
-                })
+                }
 
     return jsonify(live)
 
@@ -920,7 +966,6 @@ def get_stats():
         })
     except Exception as e:
         return jsonify({"error": str(e)}), 500
-
 
 @app.route("/")
 def dashboard():
