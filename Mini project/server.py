@@ -43,7 +43,7 @@ TRAINING_CSV = BASE_DIR / "disaster_training_data.csv"
 
 # Timing (ALL CONFIGURABLE)
 DATA_COLLECTION_INTERVAL = 15 * 60      # Collect sensor data for 15 min (900 sec)
-PREDICTION_INTERVAL = 15 * 60           # Make prediction every 15 min
+PREDICTION_INTERVAL = 1 * 60           # Make prediction every 1 min
 AUTO_RETRAIN_INTERVAL = 24 * 60 * 60    # Retrain ML model every 24 hours
 MIN_LABELLED_SAMPLES = 20               # Need 20+ real events to retrain
 
@@ -165,28 +165,20 @@ class DisasterPrediction:
 
 SITE_CONFIG = {
     1: {
-        "name": "Mountain Slope A - Kerala",
+        "name": "Slope Near GEC idukki-1",
         "soil_type": 2,                 # 1=clay, 2=loam, 3=sand
         "slope": 35,                    # degrees
         "vegetation_cover": 55,         # %
-        "lat": 10.02,                   # Latitude (for map visualization)
-        "lon": 76.30                    # Longitude (for map visualization)
+        "lat": 9.850,                   # Latitude (for map visualization)
+        "lon": 76.938                    # Longitude (for map visualization)
     },
     2: {
         "name": "Valley B - Himachal",
         "soil_type": 1,
         "slope": 20,
         "vegetation_cover": 45,
-        "lat": 31.78,                   # Different location for demo
-        "lon": 77.10
-    },
-    3: {
-        "name": "Coastal Area C - Maharashtra",
-        "soil_type": 3,
-        "slope": 12,
-        "vegetation_cover": 35,
-        "lat": 18.52,                   # Another location
-        "lon": 73.86
+        "lat": 9.850,                   # Different location for demo
+        "lon": 76.938
     }
 }
 

@@ -28,8 +28,8 @@
 
 // ========== NODE CONFIG ==========
 #define NODE_ID 1
-#define LAT 10.02000
-#define LON 76.30000
+#define LAT 9.850
+#define LON 76.938
 #define SENSOR_READ_INTERVAL_MS 5000
 
 uint8_t GATEWAY_MAC[] = {0x00, 0x4B, 0x12, 0x3D, 0x28, 0x24};
