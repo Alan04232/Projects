@@ -625,9 +625,9 @@ def make_disaster_prediction(node_id: int, agg_data: AveragedSensorData) -> Disa
 
 def aggregation_and_prediction_thread():
     """
-    REQUIREMENT 3: Every 15 minutes:
-    1. Average sensor data
-    2. Make predictions
+    REQUIREMENT 3: Every 1 minutes:
+    1. Average sensor data collect in 15 min
+    2. Make predictions in 1
     3. Save to CSV
     """
     while True:
