@@ -173,12 +173,12 @@ SITE_CONFIG = {
         "lon": 76.938                    # Longitude (for map visualization)
     },
     2: {
-        "name": "Valley B - Himachal",
+        "name": "Slope Near GEC idukki-2",
         "soil_type": 1,
         "slope": 20,
         "vegetation_cover": 45,
-        "lat": 9.850,                   # Different location for demo
-        "lon": 76.938
+        "lat": 9.849,                   # Different location for demo
+        "lon": 76.939
     }
 }
 
